@@ -1,0 +1,29 @@
+# Environment — never commit real keys
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+
+# Data files — generated at runtime
+data/*.duckdb
+data/*.db
+data/tenants/
+
+# Node / frontend build
+ui/node_modules/
+ui/dist/
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+*.swp

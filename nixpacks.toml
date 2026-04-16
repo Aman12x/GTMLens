@@ -1,0 +1,17 @@
+# Railway build config — Python (FastAPI) + Node (React build)
+# Python is auto-detected from pyproject.toml; we add Node for the UI build.
+
+[phases.setup]
+nixPkgs = ["nodejs_20"]
+
+[phases.install]
+cmds = [
+    "pip install -e .",
+    "cd ui && npm ci"
+]
+
+[phases.build]
+cmds = ["cd ui && npm run build"]
+
+[start]
+cmd = "uvicorn api.main:app --host 0.0.0.0 --port $PORT"
