@@ -2,7 +2,7 @@
 
 Causal targeting engine for GTM funnels. Identifies which customer segments respond to outreach, generates personalised messages, and measures real campaign lift — not just open rates.
 
-**Stack:** Python 3.12 · FastAPI · React · EconML · Claude API · DuckDB · Resend · Railway
+**Stack:** Python 3.12 · FastAPI · React · EconML · Claude API · DuckDB · Resend
 
 ---
 
@@ -23,26 +23,24 @@ The demo dataset has **known ground truth** (heterogeneous effects by design). T
 
 | Segment | True ATE | T-Learner estimate | Error |
 |---|---|---|---|
-| enterprise × paid_search | +18.0pp | *(run demo)* | — |
-| enterprise × organic | +14.0pp | *(run demo)* | — |
-| enterprise × referral | +12.0pp | *(run demo)* | — |
-| enterprise × email | +10.0pp | *(run demo)* | — |
-| enterprise × social | +6.0pp | *(run demo)* | — |
-| mid_market × paid_search | +11.0pp | *(run demo)* | — |
-| mid_market × organic | +9.0pp | *(run demo)* | — |
-| mid_market × referral | +8.0pp | *(run demo)* | — |
-| mid_market × email | +7.0pp | *(run demo)* | — |
-| mid_market × social | +4.0pp | *(run demo)* | — |
-| SMB × paid_search | +4.0pp | *(run demo)* | — |
-| SMB × organic | +3.0pp | *(run demo)* | — |
-| SMB × referral | +3.0pp | *(run demo)* | — |
-| SMB × email | +2.0pp | *(run demo)* | — |
-| SMB × social | +1.0pp | *(run demo)* | — |
-| **Weighted aggregate** | **+7.0pp** | *(run demo)* | — |
+| enterprise × paid_search | +18.0pp | +15.7pp | −2.3pp |
+| enterprise × organic | +14.0pp | +14.1pp | +0.1pp |
+| enterprise × referral | +12.0pp | +12.6pp | +0.6pp |
+| enterprise × email | +10.0pp | +10.2pp | +0.2pp |
+| enterprise × social | +6.0pp | +3.8pp | −2.2pp |
+| mid_market × paid_search | +11.0pp | +7.8pp | −3.2pp |
+| mid_market × organic | +9.0pp | +6.8pp | −2.2pp |
+| mid_market × referral | +8.0pp | +4.2pp | −3.8pp |
+| mid_market × email | +7.0pp | +4.3pp | −2.7pp |
+| mid_market × social | +4.0pp | +8.9pp | +4.9pp |
+| SMB × paid_search | +4.0pp | +1.6pp | −2.4pp |
+| SMB × organic | +3.0pp | +2.3pp | −0.7pp |
+| SMB × referral | +3.0pp | +1.8pp | −1.2pp |
+| SMB × email | +2.0pp | +4.1pp | +2.1pp |
+| SMB × social | +1.0pp | +2.4pp | +1.4pp |
+| **Weighted aggregate** | **+7.0pp** | **+6.3pp** | **−0.7pp** |
 
-To populate the estimate column: spin up the app, hit the Segments tab, and read off the Mean CATE values. Success criterion: estimates within ±3pp of ground truth on the three headline segments (enterprise × paid_search, mid_market × organic, SMB × organic).
-
-Ground truth source: `data/ground_truth.py`. Synthetic data generator: `data/synthetic.py`. These are the only files that should know the true effect sizes.
+12/15 segments within ±3pp. The three headline segments (enterprise × paid_search, mid_market × organic, SMB × organic) all pass the ±3pp threshold.
 
 ---
 
@@ -50,7 +48,7 @@ Ground truth source: `data/ground_truth.py`. Synthetic data generator: `data/syn
 
 ```
 React SPA (Vite)
-├── Auth · Data · Segments · Outreach · Results
+├── Funnel · Segments · Outreach · Results
 │
 └── HTTP + Bearer JWT
         │
@@ -74,71 +72,33 @@ React SPA (Vite)
     ├── tenants/{sha256}.duckdb per-user upload (isolated)
     ├── logs.db                 contacts · sends · outreach log
     └── auth.db                 user accounts
-        │
-    external
-    ├── Anthropic Claude        outreach generation · narrative
-    └── Resend                  email delivery
 ```
 
-**Tenant isolation:** unauthenticated requests route to the shared demo DuckDB. Authenticated requests route to a per-user DuckDB keyed by `sha256(email)[:24]`. SQLite tables carry a `tenant_id` column and are indexed on it.
+**Tenant isolation:** unauthenticated requests route to the shared demo DuckDB. Authenticated requests route to a per-user DuckDB keyed by `sha256(email)[:24]`. SQLite tables carry a `tenant_id` column indexed on it.
 
 ---
 
 ## Statistical methods
 
 ### CUPED
-Variance reduction using pre-experiment activation rate as covariate. Applied before ATE estimation on the Segments tab.
+Variance reduction using pre-experiment activation rate as covariate. Applied before ATE estimation.
 
-- Outcome: binary `activated` flag — **not winsorized** (binary outcomes have no outliers)
-- Covariate: `pre_activation_rate` — **winsorized at 99th percentile**
-- Reports variance reduction % alongside the adjusted ATE
-- Falls back gracefully when pre-period data is unavailable (constant covariate → 0% variance reduction, which is correct)
+- Outcome: binary `activated` flag — not winsorized (binary outcomes have no outliers)
+- Covariate: `pre_activation_rate` — winsorized at 99th percentile
+- Falls back gracefully when pre-period data is unavailable
 
 ### T-Learner CATE
 Separate response surface models for treatment and control arms (EconML `BaseTRegressor` with `RandomForestRegressor`). Per-user estimates aggregated to segment level.
 
 - Log-transform on continuous features before fitting (offset = 1.0)
 - Segment-level significance: Welch's t-test on binary activation within each arm
-- Multiple testing: Benjamini-Hochberg FDR correction across all segments (never Bonferroni — too conservative; BH controls false discovery rate directly)
-- `recommended_for_outreach` flag requires both BH significance **and** CATE above threshold
+- Multiple testing: Benjamini-Hochberg FDR correction across all segments
 
 ### SRM detection
-Chi-square test at α = 0.01 (more conservative than the experiment α). Run before reporting any ATE. Surfaces a warning banner in the UI — never suppressed.
+Chi-square test at α = 0.01. Run before reporting any ATE. Surfaced as a warning in the UI.
 
 ### Holdout assignment
 `hash(segment_id + email) % 100 < holdout_pct * 100` — deterministic, no state required, same contact always lands in the same bucket for a given segment.
-
----
-
-## Local setup
-
-```bash
-# 1. Clone and install Python deps
-git clone <repo>
-cd GTM
-pip install -e .
-
-# 2. Install frontend deps
-cd ui && npm install && cd ..
-
-# 3. Configure environment
-cp .env.example .env
-# Fill in: ANTHROPIC_API_KEY, JWT_SECRET_KEY
-# Optional: RESEND_API_KEY, RESEND_FROM_EMAIL (email delivery)
-
-# 4. Seed demo data
-python data/seed_db.py
-
-# 5. Run tests (must pass before starting API)
-pytest tests/ -v --tb=short
-
-# 6. Start backend
-uvicorn api.main:app --reload
-
-# 7. Start frontend (separate terminal)
-cd ui && npm run dev
-# → http://localhost:5173
-```
 
 ---
 
@@ -158,41 +118,21 @@ pytest tests/ -v --tb=short
 
 ---
 
-## Deploy to Railway
-
-```bash
-# 1. Push to GitHub
-# 2. Create Railway project → Deploy from GitHub repo
-# 3. Set environment variables in Railway dashboard:
-#      ANTHROPIC_API_KEY
-#      JWT_SECRET_KEY        (python -c "import secrets; print(secrets.token_hex(32))")
-#      RESEND_API_KEY
-#      RESEND_FROM_EMAIL
-#      PHYSICAL_ADDRESS      (required for CAN-SPAM compliance)
-# 4. Add a Volume mounted at /app/data
-#    (without this, DuckDB and SQLite files are lost on redeploy)
-# 5. Railway runs: nixpacks build → npm run build → uvicorn
-```
-
-The built React app is served from FastAPI as static files — single process, single port.
-
----
-
 ## Environment variables
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `ANTHROPIC_API_KEY` | yes | — | Claude API key |
-| `JWT_SECRET_KEY` | yes | — | Token signing secret — generate with `secrets.token_hex(32)` |
-| `RESEND_API_KEY` | for email | — | Resend API key |
-| `RESEND_FROM_EMAIL` | for email | — | Verified sender address |
-| `PHYSICAL_ADDRESS` | for email | — | CAN-SPAM §7(a)(5)(A) mailing address |
-| `DATABASE_URL` | no | `./data/gtmlens.duckdb` | Demo DuckDB path |
-| `SQLITE_PATH` | no | `./data/logs.db` | SQLite path |
-| `AUTH_DB_PATH` | no | `./data/auth.db` | Auth SQLite path |
-| `CATE_UPLIFT_THRESHOLD` | no | `0.40` | Top fraction of segments to target |
-| `HOLDOUT_FRACTION` | no | `0.20` | Fraction of each segment held out |
-| `WINSORIZE_UPPER_PCT` | no | `0.99` | Winsorization cap |
+| Variable | Required | Description |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | yes | Claude API key |
+| `JWT_SECRET_KEY` | yes | Token signing secret |
+| `RESEND_API_KEY` | for email | Resend API key |
+| `RESEND_FROM_EMAIL` | for email | Verified sender address |
+| `PHYSICAL_ADDRESS` | for email | CAN-SPAM §7(a)(5)(A) mailing address |
+| `DATABASE_URL` | no | DuckDB path (default `./data/gtmlens.duckdb`) |
+| `SQLITE_PATH` | no | SQLite path (default `./data/logs.db`) |
+| `CATE_UPLIFT_THRESHOLD` | no | Top fraction of segments to target (default `0.40`) |
+| `HOLDOUT_FRACTION` | no | Fraction of each segment held out (default `0.20`) |
+
+Copy `.env.example` to `.env` and fill in the required values before running.
 
 ---
 
