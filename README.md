@@ -136,10 +136,3 @@ Copy `.env.example` to `.env` and fill in the required values before running.
 
 ---
 
-## Interview talking points
-
-- **CUPED:** "Winsorize at 99th percentile for the experiment estimator — preserves units, reduces variance, same approach used in production at Meta and Uber. Binary outcomes are never winsorized."
-- **CATE:** "T-Learner gives separate response surfaces per arm. Segment aggregation identifies which buckets have the highest lift. BH correction controls FDR — we never use Bonferroni because it's too conservative and doesn't match how we think about false discovery in a targeting context."
-- **Holdout:** "Deterministic hash of segment + email — no state required, reproducible, same contact always lands in the same bucket."
-- **Outreach as treatment:** "Outreach message is modelled as a treatment variant. We measure causal lift on activation rate, not open rate. The holdout group is the counterfactual."
-- **Why not send to everyone:** "CATE identifies heterogeneous effects. Sending to low-uplift segments dilutes the signal and wastes budget. Threshold filter enforces precision over volume."
