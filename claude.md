@@ -464,7 +464,8 @@ POST /api/outreach/generate → segment-conditional messages
 POST /api/outreach/results  → lift measurement on outreach campaign
 POST /api/narrative         → LLM result explanation
 POST /api/score[/batch]     → per-row uplift scoring (Clay HTTP columns)
-POST /api/score/train       → fit + persist tenant scoring model
+POST /api/score/outcomes    → import activations for scored contacts (both arms)
+POST /api/score/train       → fit scoring model (funnel or campaign source + power check)
 GET  /api/score/srm         → assignment-split + holdout-violation audit
 POST /api/contacts/*        → contact upload + outcome import
 POST /api/alpha/auth/*      → register/login (JWT) + API-key mint/revoke

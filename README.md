@@ -185,13 +185,24 @@ segment responds; Clay writes the copy.
 
 1. **Wave 0 (cold start)** — no model yet: `/api/score` returns a randomized
    `assignment` (`treat`/`control`). Send to `treat` only. The first wave *is* the experiment.
-2. Import outcomes (replies / activations) via `/api/contacts/upload` + `/api/contacts/activate`
-   or the Data tab, then `POST /api/score/train`.
+2. Import outcomes for **both arms** with `POST /api/score/outcomes`
+   (`{"activated_emails": [...]}` — the same addresses Clay scored; control-arm outcomes are
+   the baseline every lift number is measured against). Then `POST /api/score/train` —
+   `source: "auto"` picks the campaign data once outcomes exist.
 3. **Wave 1+** — `/api/score` now returns real CATE estimates and tiers. Keep the holdout
    filter on; the Results tab shows treatment-minus-holdout lift per segment.
-4. `GET /api/score/srm` audits the loop: chi-square on the realized assignment split
+   Retraining uses only randomized (cold-start) cohorts by default — waves that were
+   targeted by a model's own tiers are excluded so the model can't confound its own
+   training data.
+4. Every train response includes a **power check**: the arm size needed to detect your MDE
+   at 80% power. An underpowered model still trains but is flagged — treat its tiers as
+   provisional until enough outcomes accumulate.
+5. `GET /api/score/srm` audits the loop: chi-square on the realized assignment split
    (α = 0.01) and a **holdout-violation count** — control-assigned contacts that were sent
    anyway, i.e. a misconfigured Clay filter contaminating your experiment.
+
+Invalid or revoked API keys return **401** — a misconfigured Clay column fails loudly
+instead of silently filling with demo-tenant scores.
 
 Scoring is pure model inference (no LLM in the hot path), deterministic per contact, and
 idempotent — Clay retries and column re-runs are safe.
