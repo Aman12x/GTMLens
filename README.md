@@ -98,6 +98,14 @@ Separate response surface models for treatment and control arms (scikit-learn `G
   per replicate, so the interval reflects model-fit variability, not just the
   variance of averaging fixed predictions
 
+### Qini curve (targeting validation)
+`POST /api/segment/qini` checks whether the CATE ranking actually orders users by
+incremental response. Scores are **cross-fitted** (5-fold; every user is scored by a
+model that never saw them) so the curve reflects out-of-sample ranking quality.
+On the demo dataset: Qini coefficient +49.3, with the top 20% of users by predicted
+CATE capturing 34% of total incremental activations (1.7× random targeting) and the
+top 30% capturing 43%.
+
 ### SRM detection
 Chi-square test at α = 0.01. Run before reporting any ATE. Surfaced as a warning in the UI.
 

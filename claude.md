@@ -458,7 +458,8 @@ Do not editorialize. Be direct. Max 150 words.
 ```
 POST /api/analyze           → funnel summary + causal attribution
 POST /api/experiment/design → power calc + experiment spec
-POST /api/segment/cate      → HTE estimates by segment
+POST /api/segment/cate      → HTE estimates by segment (optional bootstrap CIs)
+POST /api/segment/qini      → cross-fitted Qini curve (CATE ranking validation)
 POST /api/outreach/generate → segment-conditional messages
 POST /api/outreach/results  → lift measurement on outreach campaign
 POST /api/narrative         → LLM result explanation
