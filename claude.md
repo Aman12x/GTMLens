@@ -88,9 +88,10 @@ These are non-negotiable. If unsure, implement the conservative option.
 - Use T-Learner as default — it's the most defensible in interviews
   (implemented with sklearn GradientBoostingRegressor response surfaces)
 - CausalForest (EconML) is available but only run if N > 5000 per arm
-- CausalForest reports per-user confidence intervals; T/S-Learner currently
-  return point estimates only — bootstrap CIs on segment-level CATE are the
-  agreed next step, do not claim CIs the default path doesn't produce
+- CausalForest reports native per-user confidence intervals; T/S-Learner
+  segment-level CATE gets bootstrap percentile CIs (stratified-by-arm
+  resample, full refit per replicate — core/causal.bootstrap_segment_cate_cis,
+  opt-in via include_ci on /api/segment/cate)
 - Log-transform continuous features before fitting (offset=1.0)
 
 **SRM Detection**
@@ -604,11 +605,11 @@ Shipped post-MVP:
 - Real email sending → Resend with CAN-SPAM footer (core/email_sender.py)
 - Auth / multi-tenant → JWT + API keys, per-tenant DuckDB isolation
 - CRM/GTM-tool integration → Clay HTTP-column scoring (/api/score)
+- Bootstrap CIs on T/S-Learner segment CATE (include_ci on /api/segment/cate)
 
 Still out of scope:
 - Multi-channel sequencing (delegated to the sequencer Clay pushes to)
 - Fine-tuning / RAG on company data
-- Bootstrap CIs on T/S-Learner segment CATE (agreed next step)
 
 ---
 

@@ -93,6 +93,10 @@ Separate response surface models for treatment and control arms (scikit-learn `G
 - Log-transform on continuous features before fitting (offset = 1.0)
 - Segment-level significance: Welch's t-test on binary activation within each arm
 - Multiple testing: Benjamini-Hochberg FDR correction across all segments
+- Uncertainty: opt-in bootstrap 95% CIs on segment mean CATE (`include_ci` on
+  `/api/segment/cate`) — stratified-by-arm resampling with a full learner refit
+  per replicate, so the interval reflects model-fit variability, not just the
+  variance of averaging fixed predictions
 
 ### SRM detection
 Chi-square test at α = 0.01. Run before reporting any ATE. Surfaced as a warning in the UI.
