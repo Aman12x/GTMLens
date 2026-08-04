@@ -118,6 +118,74 @@ pytest tests/ -v --tb=short
 
 ---
 
+## Using GTMLens with Clay
+
+GTMLens plugs into a [Clay](https://clay.com) table as the **causal scoring brain**: Clay
+sources and enriches prospects and pushes to your sequencer; GTMLens decides who is worth
+contacting (uplift, not fit score), keeps the holdout honest, and measures real lift.
+
+### 1. Mint an API key
+
+```bash
+# register + login, then:
+curl -X POST https://<your-deploy>/api/alpha/auth/api-key \
+  -H "Authorization: Bearer $JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"label": "clay-outbound-table"}'
+# → {"api_key": "gtml_…", …}   shown once — store it in Clay
+```
+
+### 2. Add an HTTP API enrichment column in Clay
+
+- **Method** `POST` · **URL** `https://<your-deploy>/api/score`
+- **Headers** `X-API-Key: gtml_…` · `Content-Type: application/json`
+- **Body** (map Clay columns into the template):
+
+```json
+{
+  "email": "{{Email}}",
+  "employee_count": {{Employee Count}},
+  "industry": "{{Industry}}",
+  "channel": "{{Source}}"
+}
+```
+
+Raw values are normalized server-side: employee counts and ranges ("51-200") bucket into
+SMB / mid_market / enterprise; source labels ("Google Ads", "LinkedIn", "SEO") map onto
+paid_search / social / organic / referral / email.
+
+- **Response fields → Clay columns**: `assignment`, `holdout_flag`, `uplift_tier`,
+  `cate_estimate`, `message_angle`, `model_version`.
+
+### 3. Route rows with Clay filters
+
+| Filter | Action |
+|---|---|
+| `holdout_flag = true` | **Suppress — never send.** These contacts measure lift. |
+| `uplift_tier = high` | Push to your primary sequence |
+| `uplift_tier = mid` | Standard sequence |
+| `uplift_tier = deprioritize` | Low-cost nurture or skip |
+
+Feed `message_angle` into Clay's AI messaging column prompt — GTMLens supplies *why* this
+segment responds; Clay writes the copy.
+
+### 4. Close the loop
+
+1. **Wave 0 (cold start)** — no model yet: `/api/score` returns a randomized
+   `assignment` (`treat`/`control`). Send to `treat` only. The first wave *is* the experiment.
+2. Import outcomes (replies / activations) via `/api/contacts/upload` + `/api/contacts/activate`
+   or the Data tab, then `POST /api/score/train`.
+3. **Wave 1+** — `/api/score` now returns real CATE estimates and tiers. Keep the holdout
+   filter on; the Results tab shows treatment-minus-holdout lift per segment.
+4. `GET /api/score/srm` audits the loop: chi-square on the realized assignment split
+   (α = 0.01) and a **holdout-violation count** — control-assigned contacts that were sent
+   anyway, i.e. a misconfigured Clay filter contaminating your experiment.
+
+Scoring is pure model inference (no LLM in the hot path), deterministic per contact, and
+idempotent — Clay retries and column re-runs are safe.
+
+---
+
 ## Environment variables
 
 | Variable | Required | Description |
@@ -129,8 +197,11 @@ pytest tests/ -v --tb=short
 | `PHYSICAL_ADDRESS` | for email | CAN-SPAM §7(a)(5)(A) mailing address |
 | `DATABASE_URL` | no | DuckDB path (default `./data/gtmlens.duckdb`) |
 | `SQLITE_PATH` | no | SQLite path (default `./data/logs.db`) |
+| `MODELS_DIR` | no | Persisted scoring models (default `./data/models`) |
 | `CATE_UPLIFT_THRESHOLD` | no | Top fraction of segments to target (default `0.40`) |
 | `HOLDOUT_FRACTION` | no | Fraction of each segment held out (default `0.20`) |
+| `COLD_START_CONTROL_FRACTION` | no | Control share in wave-0 randomization (default `0.50`) |
+| `SCORE_DEPRIORITIZE_FRACTION` | no | Bottom CATE fraction tiered `deprioritize` (default `0.30`) |
 
 Copy `.env.example` to `.env` and fill in the required values before running.
 

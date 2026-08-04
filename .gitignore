@@ -15,6 +15,7 @@ venv/
 data/*.duckdb
 data/*.db
 data/tenants/
+data/models/
 
 # Node / frontend build
 ui/node_modules/
