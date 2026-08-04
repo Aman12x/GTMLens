@@ -112,13 +112,21 @@ def get_optional_machine_user(
         2. Bearer JWT        — so the same routes work from the SPA / curl
         3. None              — demo tenant (synthetic data), for pre-signup trials
 
-    Never raises — invalid credentials degrade to the demo tenant, matching
-    get_optional_user semantics.
+    A PRESENT but invalid/revoked X-API-Key raises 401 rather than degrading
+    to the demo tenant: a machine caller with a typo'd key must fail loudly,
+    not silently fill Clay columns with demo-model scores.
     """
     if x_api_key:
         user = get_user_for_api_key(x_api_key)
-        if user is not None:
-            return user
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "error": "Invalid API key",
+                    "detail": "The X-API-Key is unknown or revoked. Mint one at /api/alpha/auth/api-key.",
+                },
+            )
+        return user
     return get_optional_user(token)
 
 
