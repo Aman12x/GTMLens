@@ -18,6 +18,7 @@ import pytest
 from core.causal import (
     CausalEstimationError,
     bh_correction,
+    bootstrap_segment_cate_cis,
     cuped_adjustment,
     detect_srm,
     diff_in_diff,
@@ -406,3 +407,83 @@ def test_estimate_cate_s_learner_runs() -> None:
     result = estimate_cate(df, "outcome", "treatment", ["x1", "x2"], method="s_learner")
     assert "cate_estimate" in result.columns
     assert result["cate_estimate"].notna().sum() > 0
+
+
+# ---------------------------------------------------------------------------
+# bootstrap_segment_cate_cis
+# ---------------------------------------------------------------------------
+
+
+def _make_segment_cate_df(n: int = 2000, seed: int = 3) -> pd.DataFrame:
+    """Two segments with designed effects: 'big' +20pp, 'small' +2pp."""
+    rng = np.random.default_rng(seed)
+    segment = rng.choice(["big", "small"], size=n)
+    treatment = (rng.random(n) < 0.5).astype(int)
+    x1 = rng.normal(0, 1, n)
+    effect = np.where(segment == "big", 0.20, 0.02)
+    p = 0.35 + effect * treatment
+    outcome = rng.binomial(1, p.clip(0.01, 0.99))
+    return pd.DataFrame({
+        "treatment": treatment,
+        "outcome":   outcome,
+        "x1":        x1,
+        "seg_flag":  (segment == "big").astype(float),  # learner feature
+        "segment":   segment,
+    })
+
+
+def test_bootstrap_cis_contain_designed_effects() -> None:
+    df = _make_segment_cate_df()
+    cis = bootstrap_segment_cate_cis(
+        df, "outcome", "treatment", ["x1", "seg_flag"], ["segment"],
+        n_boot=40, random_state=1,
+    )
+    big = cis[("big",)]
+    small = cis[("small",)]
+    # Bounds are ordered and the large designed effect is bracketed
+    assert big["ci_lower"] <= big["boot_mean"] <= big["ci_upper"]
+    assert big["ci_lower"] <= 0.20 <= big["ci_upper"]
+    # The near-zero effect may be shrunk slightly below its true +2pp by GBR
+    # regularisation (bootstrap captures variance, not shrinkage bias) — the
+    # interval must still be consistent with a small positive effect
+    assert small["ci_lower"] <= 0.03
+    assert small["ci_upper"] >= 0.0
+    # The high-effect segment's interval sits clearly above the low-effect one's
+    assert big["ci_lower"] > small["ci_upper"]
+
+
+def test_bootstrap_is_reproducible_with_same_seed() -> None:
+    df = _make_segment_cate_df(n=800)
+    a = bootstrap_segment_cate_cis(
+        df, "outcome", "treatment", ["x1", "seg_flag"], ["segment"],
+        n_boot=25, random_state=7, n_jobs=1,
+    )
+    b = bootstrap_segment_cate_cis(
+        df, "outcome", "treatment", ["x1", "seg_flag"], ["segment"],
+        n_boot=25, random_state=7, n_jobs=1,
+    )
+    assert a == b
+
+
+def test_bootstrap_rejects_causal_forest() -> None:
+    df = _make_segment_cate_df(n=400)
+    with pytest.raises(CausalEstimationError, match="t_learner and s_learner"):
+        bootstrap_segment_cate_cis(
+            df, "outcome", "treatment", ["x1"], ["segment"], method="causal_forest",
+        )
+
+
+def test_bootstrap_rejects_too_few_replicates() -> None:
+    df = _make_segment_cate_df(n=400)
+    with pytest.raises(CausalEstimationError, match="n_boot"):
+        bootstrap_segment_cate_cis(
+            df, "outcome", "treatment", ["x1"], ["segment"], n_boot=5,
+        )
+
+
+def test_bootstrap_missing_segment_col_raises() -> None:
+    df = _make_segment_cate_df(n=400)
+    with pytest.raises(CausalEstimationError, match="not found"):
+        bootstrap_segment_cate_cis(
+            df, "outcome", "treatment", ["x1"], ["nonexistent"],
+        )

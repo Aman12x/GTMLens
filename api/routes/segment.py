@@ -33,7 +33,12 @@ from scipy import stats
 
 from api.db import get_tenant_conn, tenant_has_data
 from api.deps import OptionalUser, tenant_id_from
-from core.causal import CausalEstimationError, bh_correction, estimate_cate
+from core.causal import (
+    CausalEstimationError,
+    bh_correction,
+    bootstrap_segment_cate_cis,
+    estimate_cate,
+)
 from core.preprocess import log_transform
 
 logger = logging.getLogger(__name__)
@@ -54,12 +59,20 @@ class CateRequest(BaseModel):
     bh_alpha: float = Field(0.05, gt=0, lt=1, description="FDR level for BH correction")
     date_from: str | None = Field(None, description="ISO date filter start (YYYY-MM-DD)")
     date_to: str | None = Field(None, description="ISO date filter end (YYYY-MM-DD)")
+    include_ci: bool = Field(
+        False,
+        description="Bootstrap 95% CIs on segment mean CATE (t/s-learner only). "
+                    "Refits the learner n_boot times — expect tens of seconds on large tenants.",
+    )
+    n_boot: int = Field(100, ge=20, le=500, description="Bootstrap replicates when include_ci=true")
 
 
 class SegmentCateResult(BaseModel):
     company_size: str
     channel: str
     mean_cate: float
+    cate_ci_lower: float | None = None
+    cate_ci_upper: float | None = None
     n_treatment: int
     n_control: int
     segment_ate: float
@@ -76,6 +89,8 @@ class CateResponse(BaseModel):
     bh_alpha: float
     cate_threshold: float
     n_significant: int
+    ci_applied: bool = False
+    n_boot: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +254,29 @@ def _run_cate(req: CateRequest, tenant_id: str = "demo") -> dict:
         seg["significant_bh"] = bool(sig)
         seg["recommended_for_outreach"] = bool(sig and seg["mean_cate"] >= cate_threshold)
 
+    # 6. Optional bootstrap CIs on segment mean CATE (refit per replicate).
+    # CausalForest is excluded — it carries native per-user intervals.
+    ci_applied = False
+    if req.include_ci and req.method in ("t_learner", "s_learner"):
+        boot_df = df_enc[["activated", "treatment"] + feature_cols].copy()
+        boot_df["company_size"] = df["company_size"].values
+        boot_df["channel"] = df["channel"].values
+        cis = bootstrap_segment_cate_cis(
+            boot_df,
+            outcome_col="activated",
+            treatment_col="treatment",
+            feature_cols=feature_cols,
+            segment_cols=["company_size", "channel"],
+            method=req.method,  # type: ignore[arg-type]
+            n_boot=req.n_boot,
+        )
+        for seg in segments:
+            ci = cis.get((seg["company_size"], seg["channel"]))
+            if ci is not None:
+                seg["cate_ci_lower"] = round(ci["ci_lower"], 4)
+                seg["cate_ci_upper"] = round(ci["ci_upper"], 4)
+        ci_applied = True
+
     # Sort by mean_cate descending
     segments.sort(key=lambda s: s["mean_cate"], reverse=True)
 
@@ -257,4 +295,6 @@ def _run_cate(req: CateRequest, tenant_id: str = "demo") -> dict:
         "bh_alpha":       req.bh_alpha,
         "cate_threshold": cate_threshold,
         "n_significant":  n_significant,
+        "ci_applied":     ci_applied,
+        "n_boot":         req.n_boot if ci_applied else None,
     }

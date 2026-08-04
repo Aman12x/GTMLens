@@ -364,6 +364,130 @@ def _causal_forest(
     return point.flatten(), lb.flatten(), ub.flatten()
 
 
+def bootstrap_segment_cate_cis(
+    df: pd.DataFrame,
+    outcome_col: str,
+    treatment_col: str,
+    feature_cols: list[str],
+    segment_cols: list[str],
+    method: Literal["s_learner", "t_learner"] = "t_learner",
+    n_boot: int = 100,
+    alpha: float = 0.05,
+    random_state: int = 42,
+    n_jobs: int = -1,
+) -> dict[tuple, dict]:
+    """
+    Bootstrap confidence intervals for segment-level mean CATE.
+
+    The T/S-Learner point estimates carry no analytic uncertainty, so this
+    resamples the FULL estimation pipeline: each iteration redraws users with
+    replacement, refits the learner from scratch, and re-aggregates per-user
+    CATE to segment means. Percentile intervals over the B replicates capture
+    both model-fit and sampling variability — not just the variance of
+    averaging fixed predictions.
+
+    Resampling is stratified by treatment arm (users are drawn within-arm),
+    preserving the design's arm sizes; an unstratified resample could starve
+    one arm in small segments and make refits unstable.
+
+    Iterations run in parallel via joblib (ships with scikit-learn).
+
+    Args:
+        df:            One row per user.
+        outcome_col:   Outcome column (e.g. 'activated').
+        treatment_col: Binary treatment indicator (0/1).
+        feature_cols:  Pre-treatment covariates for the learner (encoded).
+        segment_cols:  Columns defining segments (e.g. ['company_size', 'channel']).
+        method:        't_learner' (default) or 's_learner'. CausalForest is
+                       excluded — it has native per-user intervals.
+        n_boot:        Bootstrap replicates. 100 is a reasonable floor for
+                       stable 95% percentile bounds.
+        alpha:         1 - confidence level (0.05 → 95% CI).
+        random_state:  Seed for reproducible resamples.
+        n_jobs:        joblib parallelism (-1 = all cores).
+
+    Returns:
+        Dict keyed by segment tuple (values of segment_cols), each value:
+            ci_lower     — percentile lower bound of segment mean CATE
+            ci_upper     — percentile upper bound
+            boot_mean    — mean of bootstrap replicates (diagnostic)
+            n_replicates — replicates in which the segment appeared
+
+    Raises:
+        CausalEstimationError: If columns are missing, method is unsupported,
+                               or either arm has fewer than 10 users.
+    """
+    from joblib import Parallel, delayed
+
+    if method not in ("t_learner", "s_learner"):
+        raise CausalEstimationError(
+            f"Bootstrap CIs support t_learner and s_learner, got '{method}'. "
+            f"CausalForest reports native per-user intervals."
+        )
+    for col in [outcome_col, treatment_col] + feature_cols + segment_cols:
+        if col not in df.columns:
+            raise CausalEstimationError(f"Column '{col}' not found in DataFrame.")
+    if not (0.0 < alpha < 1.0):
+        raise CausalEstimationError(f"alpha must be in (0, 1), got {alpha}.")
+    if n_boot < 20:
+        raise CausalEstimationError(f"n_boot must be >= 20 for meaningful percentiles, got {n_boot}.")
+
+    sub = df[[outcome_col, treatment_col] + feature_cols + segment_cols].dropna()
+    Y = sub[outcome_col].to_numpy(dtype=float)
+    T = sub[treatment_col].to_numpy(dtype=float)
+    X = sub[feature_cols].to_numpy(dtype=float)
+    seg_keys = pd.MultiIndex.from_frame(sub[segment_cols]).to_numpy()
+
+    t_idx = np.flatnonzero(T == 1)
+    c_idx = np.flatnonzero(T == 0)
+    if len(t_idx) < 10 or len(c_idx) < 10:
+        raise CausalEstimationError(
+            f"Bootstrap needs at least 10 users per arm. "
+            f"Got treatment={len(t_idx)}, control={len(c_idx)}."
+        )
+
+    fit_fn = _t_learner if method == "t_learner" else _s_learner
+
+    def _one_replicate(seed: int) -> dict:
+        rng = np.random.default_rng(seed)
+        idx = np.concatenate([
+            rng.choice(t_idx, size=len(t_idx), replace=True),
+            rng.choice(c_idx, size=len(c_idx), replace=True),
+        ])
+        cate = fit_fn(Y[idx], T[idx], X[idx])
+        means: dict = {}
+        boot_frame = pd.DataFrame({"seg": seg_keys[idx], "cate": cate})
+        for seg, grp in boot_frame.groupby("seg", sort=False):
+            means[seg] = float(grp["cate"].mean())
+        return means
+
+    seeds = np.random.default_rng(random_state).integers(0, 2**31 - 1, size=n_boot)
+    replicates = Parallel(n_jobs=n_jobs)(delayed(_one_replicate)(int(s)) for s in seeds)
+
+    collected: dict[tuple, list[float]] = {}
+    for rep in replicates:
+        for seg, mean in rep.items():
+            collected.setdefault(seg, []).append(mean)
+
+    lo_pct = (alpha / 2) * 100
+    hi_pct = (1 - alpha / 2) * 100
+    results: dict[tuple, dict] = {}
+    for seg, values in collected.items():
+        arr = np.asarray(values)
+        results[seg] = {
+            "ci_lower":     float(np.percentile(arr, lo_pct)),
+            "ci_upper":     float(np.percentile(arr, hi_pct)),
+            "boot_mean":    float(arr.mean()),
+            "n_replicates": len(values),
+        }
+
+    logger.info(
+        "bootstrap_segment_cate_cis | method=%s | n_boot=%d | segments=%d | alpha=%.3f",
+        method, n_boot, len(results), alpha,
+    )
+    return results
+
+
 # ---------------------------------------------------------------------------
 # DiD
 # ---------------------------------------------------------------------------
