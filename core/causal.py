@@ -285,13 +285,22 @@ def estimate_cate(
     return result
 
 
-def _t_learner(Y: np.ndarray, T: np.ndarray, X: np.ndarray) -> np.ndarray:
+def fit_t_learner_models(Y: np.ndarray, T: np.ndarray, X: np.ndarray) -> tuple[object, object]:
     """
-    T-Learner: fit separate response surfaces for treatment and control.
+    Fit the two T-Learner response surfaces and return the fitted models.
 
-    mu1(x) = E[Y | T=1, X=x]
-    mu0(x) = E[Y | T=0, X=x]
-    CATE(x) = mu1(x) - mu0(x)
+    Exposed separately from _t_learner so callers that need to persist the
+    fitted estimators (core/model_store.py — per-row scoring for Clay) use
+    the exact same models as the dashboard's on-the-fly estimation.
+
+    Args:
+        Y: Outcome array.
+        T: Binary treatment array.
+        X: Feature matrix.
+
+    Returns:
+        (model_treatment, model_control) — fitted regressors where
+        CATE(x) = model_treatment.predict(x) - model_control.predict(x).
     """
     from sklearn.ensemble import GradientBoostingRegressor
 
@@ -304,6 +313,18 @@ def _t_learner(Y: np.ndarray, T: np.ndarray, X: np.ndarray) -> np.ndarray:
     model_t.fit(X[idx_t], Y[idx_t])
     model_c.fit(X[idx_c], Y[idx_c])
 
+    return model_t, model_c
+
+
+def _t_learner(Y: np.ndarray, T: np.ndarray, X: np.ndarray) -> np.ndarray:
+    """
+    T-Learner: fit separate response surfaces for treatment and control.
+
+    mu1(x) = E[Y | T=1, X=x]
+    mu0(x) = E[Y | T=0, X=x]
+    CATE(x) = mu1(x) - mu0(x)
+    """
+    model_t, model_c = fit_t_learner_models(Y, T, X)
     return model_t.predict(X) - model_c.predict(X)
 
 

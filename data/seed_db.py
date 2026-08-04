@@ -327,6 +327,29 @@ def seed_sqlite(sqlite_path: str) -> None:
                 UNIQUE(tenant_id, email)
             );
 
+            -- One row per contact scored via /api/score (Clay HTTP columns).
+            -- UNIQUE + REPLACE keeps re-scores (Clay retries, column re-runs)
+            -- from double-counting: assignment is deterministic, so replacing
+            -- is safe. This log is the "expected split" side of the SRM check
+            -- against what was actually sent.
+            CREATE TABLE IF NOT EXISTS scored_rows (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id       TEXT NOT NULL DEFAULT 'demo',
+                scored_at       TEXT NOT NULL DEFAULT (datetime('now')),
+                email_hash      TEXT NOT NULL,
+                segment_id      TEXT NOT NULL,
+                company_size    TEXT,
+                channel         TEXT,
+                assignment      TEXT NOT NULL,
+                holdout_flag    INTEGER NOT NULL DEFAULT 0,
+                uplift_tier     TEXT,
+                cate_estimate   REAL,
+                model_version   TEXT,
+                mode            TEXT NOT NULL DEFAULT 'scored',
+                UNIQUE(tenant_id, email_hash) ON CONFLICT REPLACE
+            );
+            CREATE INDEX IF NOT EXISTS idx_scored_rows_tenant ON scored_rows (tenant_id);
+
             CREATE TABLE IF NOT EXISTS contact_sends (
                 id                  INTEGER PRIMARY KEY AUTOINCREMENT,
                 tenant_id           TEXT NOT NULL DEFAULT 'demo',

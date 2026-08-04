@@ -55,6 +55,10 @@ class _SlidingWindow:
 # 20 Claude API calls per minute per client IP — protects API key budget
 _claude_limiter = _SlidingWindow(limit=20, window_seconds=60)
 
+# 5 model-training runs per minute per client IP — training refits two
+# gradient-boosted models over the tenant's full dataset (CPU-bound seconds)
+_train_limiter = _SlidingWindow(limit=5, window_seconds=60)
+
 
 def claude_rate_limit(request: Request) -> None:
     """
@@ -72,5 +76,22 @@ def claude_rate_limit(request: Request) -> None:
             detail={
                 "error": "Rate limit exceeded",
                 "detail": "Max 20 Claude API requests per minute per IP. Retry after 60s.",
+            },
+        )
+
+
+def train_rate_limit(request: Request) -> None:
+    """
+    FastAPI dependency that limits scoring-model training runs per IP.
+
+    Raises HTTP 429 when the limit is exceeded.
+    """
+    client_ip = request.client.host if request.client else "anonymous"
+    if not _train_limiter.is_allowed(client_ip):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error": "Rate limit exceeded",
+                "detail": "Max 5 training runs per minute per IP. Retry after 60s.",
             },
         )

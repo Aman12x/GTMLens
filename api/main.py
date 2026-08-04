@@ -36,6 +36,7 @@ from api.routes import data as data_router
 from api.routes import experiment as experiment_router
 from api.routes import narrative as narrative_router
 from api.routes import outreach as outreach_router
+from api.routes import score as score_router
 from api.routes import segment as segment_router
 from core.auth import init_auth_db
 
@@ -151,6 +152,7 @@ app.include_router(outreach_router.router,   prefix="/api")
 app.include_router(narrative_router.router,  prefix="/api")
 app.include_router(contacts_router.router,   prefix="/api")
 app.include_router(data_router.router,       prefix="/api")
+app.include_router(score_router.router,      prefix="/api")
 
 # ---------------------------------------------------------------------------
 # Alpha router (auth-gated real-customer routes)

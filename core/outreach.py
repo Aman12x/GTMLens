@@ -342,6 +342,60 @@ def _classify_uplift_group(cate_estimate: float, threshold: float) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Message angles (static, no LLM call — safe for Clay's per-row hot path)
+# ---------------------------------------------------------------------------
+
+# Angle fragments are derived from which attributes drive segment-level CATE
+# in the funnel data: company size sets the value framing, channel sets the
+# context of how the prospect arrived.
+_SIZE_ANGLES: dict[str, str] = {
+    "enterprise": "lead with ROI at scale, integration depth, and security/compliance readiness",
+    "mid_market": "lead with time-to-value and team-level workflow wins, backed by a concrete benchmark",
+    "SMB":        "lead with price-to-value and same-day setup; keep the ask small",
+}
+
+_CHANNEL_ANGLES: dict[str, str] = {
+    "paid_search": "they arrived searching for a solution, so reference the problem behind the query",
+    "organic":     "they found you through their own research, so go deeper on technical substance",
+    "referral":    "name the shared connection or community early",
+    "email":       "they have seen you before, so build on the prior touchpoint and skip the intro",
+    "social":      "keep it conversational and short: one idea, one link",
+}
+
+_TIER_PREFIXES: dict[str, str] = {
+    "high":         "High predicted uplift — prioritize personalised outreach",
+    "mid":          "Moderate predicted uplift — standard sequence",
+    "deprioritize": "Low predicted uplift — route to low-cost nurture, no personalised outreach",
+    "cold_start":   "Randomised pilot wave (no uplift model yet) — send the strongest general message",
+}
+
+
+def segment_message_angle(company_size: str, channel: str, uplift_tier: str) -> str:
+    """
+    Return a one-line causal messaging angle for a scored segment.
+
+    Designed to be consumed by an external AI-writing step (e.g. Clay's AI
+    messaging column): GTMLens supplies WHY this segment responds, the
+    downstream tool writes the copy. Static lookup — never calls Claude,
+    so it is safe on the per-row scoring hot path.
+
+    Args:
+        company_size: SMB | mid_market | enterprise (unrecognised values
+                      degrade to a generic angle).
+        channel:      Acquisition channel (organic | paid_search | social |
+                      referral | email).
+        uplift_tier:  high | mid | deprioritize, from the scoring model.
+
+    Returns:
+        Single-sentence angle string.
+    """
+    prefix = _TIER_PREFIXES.get(uplift_tier, _TIER_PREFIXES["mid"])
+    size_angle = _SIZE_ANGLES.get(company_size, "lead with the clearest value proposition for this account")
+    channel_angle = _CHANNEL_ANGLES.get(channel, "match the tone to how this contact first engaged")
+    return f"{prefix}: {size_angle}; {channel_angle}."
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
