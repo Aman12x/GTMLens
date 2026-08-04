@@ -308,7 +308,7 @@ class TestScoreTrainedFlow:
 
 
 class TestApiKeyAuth:
-    def test_key_scopes_to_minting_tenant_and_revocation_degrades(self, client, auth_headers):
+    def test_key_scopes_to_minting_tenant_and_revocation_401s(self, client, auth_headers):
         mint = client.post("/api/alpha/auth/api-key", json={"label": "clay-test"}, headers=auth_headers)
         assert mint.status_code == 201
         key = mint.json()["api_key"]
@@ -325,10 +325,148 @@ class TestApiKeyAuth:
         revoke = client.delete(f"/api/alpha/auth/api-key/{prefix}", headers=auth_headers)
         assert revoke.status_code == 204
 
-        # Revoked key degrades to the demo tenant (which was trained above)
-        after = client.get("/api/score/status", headers={"X-API-Key": key}).json()
-        assert after == client.get("/api/score/status").json()
+        # A revoked key fails loudly — silently degrading to the demo tenant
+        # would fill a misconfigured Clay table with demo-model scores
+        after = client.get("/api/score/status", headers={"X-API-Key": key})
+        assert after.status_code == 401
 
-    def test_bogus_key_serves_demo_tenant(self, client):
+    def test_bogus_key_401s(self, client):
         resp = client.get("/api/score/status", headers={"X-API-Key": "gtml_not_a_real_key"})
+        assert resp.status_code == 401
+        assert resp.json()["detail"]["error"] == "Invalid API key"
+
+    def test_no_key_still_serves_demo(self, client):
+        assert client.get("/api/score/status").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Lift measurement fixes: holdout outcomes recorded, per-arm denominators
+# ---------------------------------------------------------------------------
+
+
+class TestLiftMeasurement:
+    def _seed_sends(self, tenant_id: str) -> None:
+        """4 sent + 4 holdout contacts in one segment for the auth tenant."""
+        import sqlite3
+        conn = sqlite3.connect(os.environ["SQLITE_PATH"])
+        try:
+            for i in range(8):
+                is_holdout = i >= 4
+                conn.execute(
+                    """
+                    INSERT INTO contact_sends
+                        (tenant_id, contact_id, email, segment_id, company_size,
+                         channel, cate_estimate, subject, body, is_holdout, status)
+                    VALUES (?, ?, ?, 'enterprise_paid_search', 'enterprise',
+                            'paid_search', 0.15, 's', 'b', ?, 'sent')
+                    """,
+                    (tenant_id, i + 1, f"lift{i}@corp.com", int(is_holdout)),
+                )
+            conn.execute(
+                "INSERT OR IGNORE INTO outreach_log (tenant_id, segment_id, company_size, channel, cate_estimate) "
+                "VALUES (?, 'enterprise_paid_search', 'enterprise', 'paid_search', 0.15)",
+                (tenant_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_holdout_outcomes_recorded_and_rates_use_arm_denominators(self, client, auth_headers):
+        self._seed_sends("clay-test@example.com")
+
+        # Activate 2 of 4 sent AND 1 of 4 holdout — the holdout update is the
+        # bug fix: control outcomes MUST be recordable or lift is inflated
+        resp = client.post(
+            "/api/contacts/activate",
+            json={"emails": ["lift0@corp.com", "lift1@corp.com", "lift4@corp.com"]},
+            headers=auth_headers,
+        )
         assert resp.status_code == 200
+        assert resp.json()["updated"] == 3
+        assert resp.json()["not_found"] == []
+
+        lift = client.get("/api/outreach/lift", headers=auth_headers)
+        assert lift.status_code == 200
+        seg = next(
+            s for s in lift.json()["segments"]
+            if s["segment_id"] == "enterprise_paid_search"
+        )
+        # Per-arm denominators: 2/4 sent activated, 1/4 holdout activated.
+        # The pre-fix query divided both by 8 (0.25 / 0.125) and the holdout
+        # rate could never be nonzero at all.
+        assert seg["treatment_rate"] == pytest.approx(0.5)
+        assert seg["control_rate"] == pytest.approx(0.25)
+        assert seg["observed_lift"] == pytest.approx(0.25)
+
+
+# ---------------------------------------------------------------------------
+# Flywheel: outcomes import → campaign training with cohort + power guard
+# ---------------------------------------------------------------------------
+
+
+class TestFlywheel:
+    def test_outcomes_bridge_and_campaign_training(self, client, auth_headers):
+        # Cold-start rows for this tenant already exist from TestScoreColdStart
+        # (401 scored contacts). Import outcomes for a known subset.
+        activated = [f"user{i}@corp.com" for i in range(0, 120)]
+        resp = client.post(
+            "/api/score/outcomes",
+            json={"activated_emails": activated + ["never-scored@nowhere.com"]},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["updated"] == 120
+        assert body["not_found"] == 1
+        assert body["n_with_outcomes"] == 120
+
+        # Campaign training uses the randomized cold-start cohort
+        train = client.post("/api/score/train", json={"source": "campaign"}, headers=auth_headers)
+        assert train.status_code == 200
+        meta = train.json()
+        assert meta["source_used"] == "campaign"
+        assert meta["n_treatment"] + meta["n_control"] >= 400
+        # Power guard: 400 contacts is far below the N needed for a 5pp MDE
+        pc = meta["power_check"]
+        assert pc["adequately_powered"] is False
+        assert pc["warning"] is not None
+        assert pc["required_n_per_arm"] > pc["n_treatment"]
+
+    def test_rescore_preserves_imported_outcome(self, client, auth_headers):
+        import hashlib
+        import sqlite3
+
+        email = "user0@corp.com"  # received an outcome in the previous test
+        client.post("/api/score", json={"email": email, "employee_count": 40, "channel": "SEO"}, headers=auth_headers)
+
+        conn = sqlite3.connect(os.environ["SQLITE_PATH"])
+        try:
+            row = conn.execute(
+                "SELECT activated_at FROM scored_rows WHERE tenant_id = ? AND email_hash = ?",
+                ("clay-test@example.com", hashlib.sha256(email.encode()).hexdigest()[:16]),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None and row[0] is not None
+
+    def test_auto_source_prefers_campaign_when_outcomes_exist(self, client, auth_headers):
+        train = client.post("/api/score/train", json={"source": "auto"}, headers=auth_headers)
+        assert train.status_code == 200
+        assert train.json()["source_used"] == "campaign"
+
+    def test_campaign_training_without_data_404s(self, client):
+        # Fresh tenant with no scored rows at all
+        client.post(
+            "/api/alpha/auth/register",
+            json={"email": "empty-tenant@example.com", "password": "testpass123"},
+        )
+        token = client.post(
+            "/api/alpha/auth/login",
+            data={"username": "empty-tenant@example.com", "password": "testpass123"},
+        ).json()["access_token"]
+        resp = client.post(
+            "/api/score/train",
+            json={"source": "campaign"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 404
