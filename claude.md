@@ -8,7 +8,7 @@
 
 **Name:** GTMLens  
 **Pitch:** Most GTM tools tell you what happened. GTMLens tells you why — and who to target next.  
-**Stack:** Python · FastAPI · Streamlit · Claude API · Railway  
+**Stack:** Python · FastAPI · React (Vite + Tailwind) · Claude API · Railway  
 **Timeline:** 1–2 weeks MVP  
 **Portfolio signal:** Product DS (Meta/Uber IC3-4) + Applied Scientist  
 
@@ -35,7 +35,7 @@ Always build in this sequence. Do not skip ahead.
 8. core/outreach.py
 9. core/narrative.py
 10. api/main.py + routes/
-11. ui/app.py
+11. ui/ (React SPA — Vite)
 12. Railway deploy config
 ```
 
@@ -55,15 +55,18 @@ Preferred libraries — use these, do not substitute without flagging:
 ```
 pandas, numpy          → data manipulation
 duckdb                 → funnel queries
-econml                 → CATE estimation (S/T-Learner, CausalForest)
+scikit-learn           → T/S-Learner response surfaces (GradientBoostingRegressor)
+econml                 → CausalForest only (gated at N > 5000 per arm)
 scipy.stats            → power calc, chi-square SRM, BH correction
 statsmodels            → DiD regression
 anthropic              → Claude API (use official SDK, not raw HTTP)
 fastapi, uvicorn       → API layer
-streamlit              → UI
+joblib                 → scoring-model persistence (ships with scikit-learn)
 python-dotenv          → env vars
 pytest                 → tests
 ```
+Frontend: React 18 + Vite + Tailwind (TypeScript) in `ui/` — served as static
+files by FastAPI in production, Vite dev server with `/api` proxy locally.
 
 Do not add new dependencies without a comment explaining why they are necessary.
 
@@ -81,10 +84,13 @@ These are non-negotiable. If unsure, implement the conservative option.
 - Validate that covariate correlates with outcome (log Pearson r) — warn if r < 0.1
 - Report variance reduction percentage alongside ATE
 
-**CATE / EconML**
+**CATE**
 - Use T-Learner as default — it's the most defensible in interviews
-- CausalForest is available but only run if N > 5000 per segment
-- Always report confidence intervals, not just point estimates
+  (implemented with sklearn GradientBoostingRegressor response surfaces)
+- CausalForest (EconML) is available but only run if N > 5000 per arm
+- CausalForest reports per-user confidence intervals; T/S-Learner currently
+  return point estimates only — bootstrap CIs on segment-level CATE are the
+  agreed next step, do not claim CIs the default path doesn't produce
 - Log-transform continuous features before fitting (offset=1.0)
 
 **SRM Detection**
@@ -119,7 +125,7 @@ result = response.content[0].text
 - Always parse Claude responses as JSON where structured output is expected
 - Wrap all Claude API calls in try/except `anthropic.APIError`
 - Log token usage (`response.usage`) to SQLite for cost tracking
-- Never expose raw API errors to the Streamlit UI — return a graceful fallback message
+- Never expose raw API errors to the UI — return a graceful fallback message
 
 ### DuckDB Patterns
 ```python
@@ -157,19 +163,19 @@ Run tests with: `pytest tests/ -v --tb=short`
 data/synthetic.py     → raise ValueError with clear message if params invalid
 core/*.py             → raise domain-specific exceptions (CausalEstimationError, etc.)
 api/routes/*.py       → catch all exceptions, return HTTP 422/500 with error body
-ui/app.py             → catch all exceptions, display st.error() — never crash the app
+ui/src/               → ErrorBoundary + per-request error states — never blank-screen the app
 ```
 
 ### Environment Setup
 ```bash
 # On first run
 cp .env.example .env
-# Fill in ANTHROPIC_API_KEY
-pip install -r requirements.txt
-python data/seed_db.py        # generates synthetic data + seeds DuckDB
-pytest tests/ -v              # must pass before starting API
-uvicorn api.main:app --reload # start backend
-streamlit run ui/app.py       # start UI (separate terminal)
+# Fill in ANTHROPIC_API_KEY and JWT_SECRET_KEY
+uv sync                        # install Python deps from uv.lock
+uv run python data/seed_db.py  # generates synthetic data + seeds DuckDB
+uv run pytest tests/ -v        # must pass before starting API
+uv run uvicorn api.main:app --reload  # start backend
+cd ui && npm install && npm run dev   # Vite dev server, proxies /api (separate terminal)
 ```
 
 ### What NOT to Do
@@ -177,7 +183,7 @@ streamlit run ui/app.py       # start UI (separate terminal)
 - Do not store API keys in code or comments
 - Do not generate outreach for segments below CATE threshold — this is a correctness requirement, not a style preference
 - Do not skip the SRM check — if you're uncertain where to place it, put it first
-- Do not use `st.experimental_*` Streamlit APIs — use stable APIs only
+- Do not call Claude on the /api/score hot path — Clay fires per row; scoring is pure model inference
 - Do not mock the Claude API in production code paths — only in tests
 - Do not hardcode the ground truth effect sizes anywhere except `data/ground_truth.py`
 
@@ -194,11 +200,12 @@ One logical change per commit. Do not bundle unrelated changes.
 ### Railway Deployment Checklist
 Before pushing to Railway:
 - [ ] All env vars set in Railway dashboard (not .env file)
-- [ ] `requirements.txt` pinned versions
-- [ ] `Procfile` defines both web (FastAPI) and worker (Streamlit) processes
+- [ ] Deps locked in `uv.lock` (nixpacks build installs from it)
+- [ ] Single web process: FastAPI serves the built React app from `ui/dist/`
+- [ ] Volume mounted so `data/` (DuckDB, SQLite, `data/models/`) survives redeploys
 - [ ] `GET /health` endpoint returns 200
-- [ ] Demo reset endpoint tested: `GET /api/demo/reset`
-- [ ] No hardcoded localhost URLs in UI — use `API_BASE_URL` env var
+- [ ] Demo reset endpoint tested: `POST /api/demo/reset`
+- [ ] No hardcoded localhost URLs in UI — Vite proxy in dev, same-origin in prod
 
 ---
 
@@ -215,10 +222,10 @@ Before pushing to Railway:
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                    Streamlit UI                      │
-│   Funnel View | Experiment Designer | Outreach Lab  │
+│              React SPA (Vite + Tailwind)             │
+│   Funnel | Segments | Outreach | Results | Data     │
 └──────────────────────┬──────────────────────────────┘
-                       │ HTTP
+                       │ HTTP + Bearer JWT
 ┌──────────────────────▼──────────────────────────────┐
 │                   FastAPI Backend                    │
 │                                                      │
@@ -226,7 +233,9 @@ Before pushing to Railway:
 │  /experiment   → Design + power + SRM               │
 │  /segment      → CATE + HTE by subgroup             │
 │  /outreach     → Segment-conditional message gen    │
-│  /results      → Lift measurement + narrative       │
+│  /score        → Per-row uplift scoring (Clay)      │
+│  /contacts     → Upload + outcome import            │
+│  /alpha/auth   → JWT + API keys (multi-tenant)      │
 └──────┬───────────────┬──────────────────────────────┘
        │               │
 ┌──────▼──────┐  ┌─────▼──────────────────────────────┐
@@ -322,7 +331,7 @@ def estimate_cate(
     method: Literal["s_learner", "t_learner", "causal_forest"] = "t_learner",
 ) -> pd.DataFrame:
     # Returns per-user CATE estimates + segment-level aggregations
-    # Reuses UpliftBench patterns (EconML)
+    # T/S-Learner: sklearn GradientBoostingRegressor; causal_forest: EconML
 ```
 
 #### DiD (campaign-level)
@@ -446,38 +455,32 @@ Do not editorialize. Be direct. Max 150 words.
 ### 7. API Layer (`api/`)
 
 ```
-POST /api/analyze          → funnel summary + causal attribution
+POST /api/analyze           → funnel summary + causal attribution
 POST /api/experiment/design → power calc + experiment spec
-POST /api/segment/cate     → HTE estimates by segment
+POST /api/segment/cate      → HTE estimates by segment
 POST /api/outreach/generate → segment-conditional messages
 POST /api/outreach/results  → lift measurement on outreach campaign
 POST /api/narrative         → LLM result explanation
-GET  /api/demo/reset        → reload synthetic data with known ground truth
+POST /api/score[/batch]     → per-row uplift scoring (Clay HTTP columns)
+POST /api/score/train       → fit + persist tenant scoring model
+GET  /api/score/srm         → assignment-split + holdout-violation audit
+POST /api/contacts/*        → contact upload + outcome import
+POST /api/alpha/auth/*      → register/login (JWT) + API-key mint/revoke
+POST /api/demo/reset        → reload synthetic data with known ground truth
 ```
 
 ---
 
 ### 8. UI Layer (`ui/`)
 
-Three tabs in Streamlit:
+React SPA (Vite + Tailwind, TypeScript) with page-per-concern routing:
 
-**Tab 1: Funnel Intelligence**
-- Funnel visualization (impression → conversion)
-- DiD chart for campaign event
-- Causal attribution breakdown by channel/segment
-
-**Tab 2: Experiment Lab**
-- Inputs: baseline rate, MDE, traffic
-- Output: experiment spec card (N, duration, guardrails)
-- CUPED toggle showing variance reduction
-- SRM checker post-experiment
-
-**Tab 3: Outreach Lab**
-- Segment selector (dropdown by industry × company_size)
-- CATE estimate shown per segment
-- "Generate outreach" button → message preview
-- Holdout experiment auto-configured
-- Results panel: lift estimate + LLM narrative
+**Funnel** — funnel visualization, stage conversion, trend charts
+**Segments** — CATE table by (company_size × channel), BH significance, outreach recommendations
+**Outreach** — segment selector, Claude message preview, holdout auto-configured
+**Results** — lift (treatment minus holdout) per segment, SRM warnings, LLM narrative
+**Data** — funnel CSV upload (schema mapper), tenant status
+**Auth** — register / login (JWT)
 
 ---
 
@@ -520,7 +523,7 @@ Three tabs in Streamlit:
 gtmlens/
 ├── CLAUDE.md
 ├── README.md
-├── requirements.txt
+├── pyproject.toml + uv.lock
 ├── .env.example
 │
 ├── data/
@@ -532,25 +535,33 @@ gtmlens/
 │   ├── preprocess.py         # Winsorize, log transform
 │   ├── causal.py             # CUPED, CATE, DiD, SRM, BH
 │   ├── experiment.py         # Power calc, experiment design
-│   ├── outreach.py           # Segment targeting + Claude API
+│   ├── model_store.py        # Fit + persist per-tenant T-Learner (Clay scoring)
+│   ├── outreach.py           # Segment targeting, message angles + Claude API
+│   ├── email_sender.py       # Resend delivery + CAN-SPAM footer
+│   ├── auth.py               # JWT, bcrypt, API keys
 │   └── narrative.py          # Result narrative + Claude API
 │
-├── api/
-│   ├── main.py               # FastAPI app
-│   └── routes/
-│       ├── analyze.py
-│       ├── experiment.py
-│       ├── outreach.py
-│       └── narrative.py
+├── ingestion/
+│   ├── schema_mapper.py      # HubSpot/Salesforce/generic CSV column mapping
+│   ├── validator.py          # Upload validation
+│   └── clay_normalizer.py    # Clay values → internal vocabulary
 │
-├── ui/
-│   └── app.py                # Streamlit app (3 tabs)
+├── api/
+│   ├── main.py               # FastAPI app (serves ui/dist in prod)
+│   ├── db.py                 # Per-tenant DuckDB routing
+│   ├── deps.py               # JWT + X-API-Key dependencies
+│   ├── rate_limit.py         # Sliding-window limiters (Claude, training)
+│   └── routes/
+│       ├── analyze.py · experiment.py · segment.py · outreach.py
+│       ├── narrative.py · contacts.py · data.py · score.py · auth.py
+│
+├── ui/                       # React SPA (Vite + Tailwind, TypeScript)
+│   └── src/pages/            # Funnel · Segments · Outreach · Results · Data · Auth
 │
 └── tests/
-    ├── test_preprocess.py
-    ├── test_causal.py
-    ├── test_experiment.py
-    └── test_outreach.py
+    ├── test_preprocess.py · test_causal.py · test_experiment.py
+    ├── test_outreach.py · test_narrative.py · test_auth.py
+    ├── test_schema_mapper.py · test_validator.py · test_score.py
 ```
 
 ---
@@ -559,13 +570,20 @@ gtmlens/
 
 ```bash
 ANTHROPIC_API_KEY=
+JWT_SECRET_KEY=                 # min 32 chars — signs access tokens
 DATABASE_URL=./data/gtmlens.duckdb
 SQLITE_PATH=./data/logs.db
+MODELS_DIR=./data/models        # persisted per-tenant scoring models
 CUPED_VARIANCE_REDUCTION_TARGET=0.30
 CATE_UPLIFT_THRESHOLD=0.40      # top 40% segments get outreach
 WINSORIZE_UPPER_PCT=0.99
 LOG_OFFSET=1.0
 HOLDOUT_FRACTION=0.20
+COLD_START_CONTROL_FRACTION=0.50  # wave-0 randomization split for /api/score
+SCORE_DEPRIORITIZE_FRACTION=0.30  # bottom CATE fraction tiered "deprioritize"
+RESEND_API_KEY=                 # email delivery (optional)
+RESEND_FROM_EMAIL=
+PHYSICAL_ADDRESS=               # CAN-SPAM footer
 ```
 
 ---
@@ -580,13 +598,17 @@ HOLDOUT_FRACTION=0.20
 
 ---
 
-## Out of Scope (MVP)
+## Out of Scope (originally MVP — several since shipped)
 
-- Real email sending (Sendgrid etc.)
-- CRM integration
-- Multi-channel sequencing
+Shipped post-MVP:
+- Real email sending → Resend with CAN-SPAM footer (core/email_sender.py)
+- Auth / multi-tenant → JWT + API keys, per-tenant DuckDB isolation
+- CRM/GTM-tool integration → Clay HTTP-column scoring (/api/score)
+
+Still out of scope:
+- Multi-channel sequencing (delegated to the sequencer Clay pushes to)
 - Fine-tuning / RAG on company data
-- Auth / multi-tenant
+- Bootstrap CIs on T/S-Learner segment CATE (agreed next step)
 
 ---
 

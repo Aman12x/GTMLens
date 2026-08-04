@@ -88,7 +88,7 @@ Variance reduction using pre-experiment activation rate as covariate. Applied be
 - Falls back gracefully when pre-period data is unavailable
 
 ### T-Learner CATE
-Separate response surface models for treatment and control arms (EconML `BaseTRegressor` with `RandomForestRegressor`). Per-user estimates aggregated to segment level.
+Separate response surface models for treatment and control arms (scikit-learn `GradientBoostingRegressor`, hand-rolled T-Learner — EconML is used for the optional CausalForest method, gated at N > 5000 per arm). Per-user estimates aggregated to segment level.
 
 - Log-transform on continuous features before fitting (offset = 1.0)
 - Segment-level significance: Welch's t-test on binary activation within each arm
