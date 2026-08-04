@@ -13,8 +13,10 @@ JWT: HS256 signed access tokens. Secret read from JWT_SECRET_KEY env var.
      ACCESS_TOKEN_EXPIRE_MINUTES (default 60).
 """
 
+import hashlib
 import logging
 import os
+import secrets
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -138,6 +140,20 @@ def init_auth_db() -> None:
                 is_active       INTEGER NOT NULL DEFAULT 1
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_email TEXT    NOT NULL COLLATE NOCASE,
+                key_hash   TEXT    NOT NULL UNIQUE,
+                key_prefix TEXT    NOT NULL,
+                label      TEXT    NOT NULL DEFAULT '',
+                created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+                is_active  INTEGER NOT NULL DEFAULT 1
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_api_keys_email ON api_keys (user_email)"
+        )
     logger.info("Auth DB ready at %s", _auth_db_path())
 
 
@@ -315,3 +331,139 @@ def get_user_by_email(email: str) -> dict | None:
             (email.strip(),),
         ).fetchone()
     return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# API keys (machine-to-machine auth — e.g. Clay HTTP API enrichment columns)
+#
+# Keys are 256-bit random tokens with a "gtml_" prefix. We store only a
+# SHA-256 hash: the token has full entropy, so a fast hash is sufficient
+# (bcrypt is for low-entropy passwords) and keeps per-request lookup cheap —
+# Clay fires one request per table row.
+# ---------------------------------------------------------------------------
+
+_API_KEY_PREFIX = "gtml_"
+
+
+def _hash_api_key(key: str) -> str:
+    """Return the SHA-256 hex digest of an API key string."""
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def create_api_key(email: str, label: str = "") -> dict:
+    """
+    Mint a new API key for an existing user.
+
+    The plaintext key is returned exactly once and never stored — only its
+    SHA-256 hash is persisted.
+
+    Args:
+        email: Email of the key owner (must be a registered, active user).
+        label: Optional human-readable label (e.g. "clay-outbound-table").
+
+    Returns:
+        Dict with keys:
+            api_key    — plaintext key (show once, then discard)
+            key_prefix — first 12 chars, for identifying the key later
+            label      — echoed label
+            created_at — creation timestamp
+
+    Raises:
+        AuthError: If the email does not belong to a registered active user.
+    """
+    user = get_user_by_email(email)
+    if user is None or not user["is_active"]:
+        raise AuthError("No active account for this email.", status_code=401)
+
+    key = _API_KEY_PREFIX + secrets.token_urlsafe(32)
+    key_prefix = key[:12]
+
+    with _db_conn() as conn:
+        conn.execute(
+            "INSERT INTO api_keys (user_email, key_hash, key_prefix, label) VALUES (?, ?, ?, ?)",
+            (email.lower().strip(), _hash_api_key(key), key_prefix, label),
+        )
+        row = conn.execute(
+            "SELECT created_at FROM api_keys WHERE key_hash = ?",
+            (_hash_api_key(key),),
+        ).fetchone()
+
+    logger.info("Minted API key prefix=%s for email=%s label=%s", key_prefix, email, label)
+    return {
+        "api_key":    key,
+        "key_prefix": key_prefix,
+        "label":      label,
+        "created_at": row["created_at"],
+    }
+
+
+def get_user_for_api_key(key: str) -> dict | None:
+    """
+    Resolve an API key to its owning user record.
+
+    Args:
+        key: Plaintext API key from the X-API-Key header.
+
+    Returns:
+        User record dict (id, email, created_at, is_active) if the key is
+        valid, active, and belongs to an active user — otherwise None.
+        Never raises: invalid keys degrade to unauthenticated (demo tenant).
+    """
+    if not key or not key.startswith(_API_KEY_PREFIX):
+        return None
+
+    with _db_conn() as conn:
+        row = conn.execute(
+            "SELECT user_email FROM api_keys WHERE key_hash = ? AND is_active = 1",
+            (_hash_api_key(key),),
+        ).fetchone()
+
+    if row is None:
+        return None
+
+    user = get_user_by_email(row["user_email"])
+    if user is None or not user["is_active"]:
+        return None
+    return user
+
+
+def list_api_keys(email: str) -> list[dict]:
+    """
+    List a user's API keys (prefixes only — plaintext is never recoverable).
+
+    Args:
+        email: Key owner's email.
+
+    Returns:
+        List of dicts: key_prefix, label, created_at, is_active.
+    """
+    with _db_conn() as conn:
+        rows = conn.execute(
+            "SELECT key_prefix, label, created_at, is_active "
+            "FROM api_keys WHERE user_email = ? COLLATE NOCASE ORDER BY created_at DESC",
+            (email.strip(),),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def revoke_api_key(email: str, key_prefix: str) -> bool:
+    """
+    Deactivate an API key identified by its prefix, scoped to the owner.
+
+    Args:
+        email:      Key owner's email (prevents cross-tenant revocation).
+        key_prefix: The 12-char prefix returned at mint time.
+
+    Returns:
+        True if a key was revoked, False if no matching active key exists.
+    """
+    with _db_conn() as conn:
+        cursor = conn.execute(
+            "UPDATE api_keys SET is_active = 0 "
+            "WHERE user_email = ? COLLATE NOCASE AND key_prefix = ? AND is_active = 1",
+            (email.strip(), key_prefix),
+        )
+        revoked = cursor.rowcount > 0
+    if revoked:
+        logger.info("Revoked API key prefix=%s for email=%s", key_prefix, email)
+    return revoked

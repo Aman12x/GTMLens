@@ -12,10 +12,10 @@ Import these with Depends() in route handlers:
 
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 
-from core.auth import AuthError, decode_access_token, get_user_by_email
+from core.auth import AuthError, decode_access_token, get_user_by_email, get_user_for_api_key
 
 # Tokenurl must match the login route exactly
 _oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/alpha/auth/login")
@@ -100,6 +100,29 @@ def tenant_id_from(user: dict | None) -> str:
     return user["email"] if user else "demo"
 
 
+def get_optional_machine_user(
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+    token: str | None = Depends(_oauth2_optional),
+) -> dict | None:
+    """
+    FastAPI dependency for machine-callable routes (e.g. Clay HTTP columns).
+
+    Resolution order:
+        1. X-API-Key header  — static header, the only auth Clay can send per row
+        2. Bearer JWT        — so the same routes work from the SPA / curl
+        3. None              — demo tenant (synthetic data), for pre-signup trials
+
+    Never raises — invalid credentials degrade to the demo tenant, matching
+    get_optional_user semantics.
+    """
+    if x_api_key:
+        user = get_user_for_api_key(x_api_key)
+        if user is not None:
+            return user
+    return get_optional_user(token)
+
+
 # Annotated aliases — use these in route signatures for clean type hints
 CurrentUser = Annotated[dict, Depends(get_current_user)]
 OptionalUser = Annotated[dict | None, Depends(get_optional_user)]
+OptionalMachineUser = Annotated[dict | None, Depends(get_optional_machine_user)]
