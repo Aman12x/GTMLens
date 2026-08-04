@@ -340,12 +340,14 @@ def seed_sqlite(sqlite_path: str) -> None:
                 segment_id      TEXT NOT NULL,
                 company_size    TEXT,
                 channel         TEXT,
+                industry        TEXT,
                 assignment      TEXT NOT NULL,
                 holdout_flag    INTEGER NOT NULL DEFAULT 0,
                 uplift_tier     TEXT,
                 cate_estimate   REAL,
                 model_version   TEXT,
                 mode            TEXT NOT NULL DEFAULT 'scored',
+                activated_at    TEXT,
                 UNIQUE(tenant_id, email_hash) ON CONFLICT REPLACE
             );
             CREATE INDEX IF NOT EXISTS idx_scored_rows_tenant ON scored_rows (tenant_id);
@@ -396,6 +398,8 @@ def migrate_sqlite(sqlite_path: str) -> None:
         ("contacts",      "UNIQUE(tenant_id, email)"),  # constraints can't be added via ALTER
         ("contact_sends", "tenant_id TEXT NOT NULL DEFAULT 'demo'"),
         ("contact_sends", "activated_at TEXT"),
+        ("scored_rows",   "industry TEXT"),
+        ("scored_rows",   "activated_at TEXT"),
         ("outreach_log",  "tenant_id TEXT NOT NULL DEFAULT 'demo'"),
         ("experiment_logs", "tenant_id TEXT NOT NULL DEFAULT 'demo'"),
         ("api_usage",     "tenant_id TEXT NOT NULL DEFAULT 'demo'"),
