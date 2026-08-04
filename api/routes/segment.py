@@ -1,5 +1,6 @@
 """
 POST /api/segment/cate — CATE estimation by segment with BH correction.
+POST /api/segment/qini — cross-fitted Qini curve validating the CATE ranking.
 
 Fits a T-Learner on all signed-up users, then aggregates per-user CATE
 estimates to the (company_size × channel) segment level. Segment-level
@@ -37,7 +38,9 @@ from core.causal import (
     CausalEstimationError,
     bh_correction,
     bootstrap_segment_cate_cis,
+    cross_fitted_cate,
     estimate_cate,
+    qini_curve,
 )
 from core.preprocess import log_transform
 
@@ -93,6 +96,29 @@ class CateResponse(BaseModel):
     n_boot: int | None = None
 
 
+class QiniRequest(BaseModel):
+    method: str = Field("t_learner", description="t_learner | s_learner (cross-fitted)")
+    n_folds: int = Field(5, ge=2, le=10, description="Cross-fitting folds")
+    n_points: int = Field(101, ge=10, le=1001, description="Curve resolution")
+    date_from: str | None = Field(None, description="ISO date filter start (YYYY-MM-DD)")
+    date_to: str | None = Field(None, description="ISO date filter end (YYYY-MM-DD)")
+
+
+class QiniResponse(BaseModel):
+    fractions: list[float]
+    incremental: list[float]
+    random_baseline: list[float]
+    qini_coefficient: float
+    total_incremental: float
+    capture_shares: dict[str, float] = Field(
+        ..., description="Targeted fraction → share of total incremental conversions captured"
+    )
+    n_users: int
+    method: str
+    n_folds: int
+    cross_fitted: bool = True
+
+
 # ---------------------------------------------------------------------------
 # Route
 # ---------------------------------------------------------------------------
@@ -135,15 +161,87 @@ def segment_cate(req: CateRequest, user: OptionalUser) -> dict:
         )
 
 
-def _run_cate(req: CateRequest, tenant_id: str = "demo") -> dict:
-    # 1. Load signed-up users (activation is the outcome)
+@router.post("/qini", response_model=QiniResponse)
+def segment_qini(req: QiniRequest, user: OptionalUser) -> dict:
+    """
+    Qini curve: does the CATE ranking actually order users by incremental response?
+
+    Scores are cross-fitted (each user scored by a model that never saw them)
+    so the curve reflects out-of-sample ranking quality, not training fit.
+    A positive Qini coefficient means targeting by predicted CATE captures
+    more incremental conversions than random targeting at the same budget;
+    capture_shares quantifies it (e.g. "top 30% captures X% of total lift").
+    """
+    if req.method not in {"t_learner", "s_learner"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": "Invalid method", "detail": "method must be t_learner or s_learner"},
+        )
+    tenant_id = tenant_id_from(user)
+    if not tenant_has_data(tenant_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "No data uploaded yet",
+                "detail": "Upload a funnel CSV on the Data tab before running Qini evaluation.",
+            },
+        )
+    try:
+        df, df_enc, feature_cols = _load_features(tenant_id, req.date_from, req.date_to)
+        scores = cross_fitted_cate(
+            df_enc,
+            outcome_col="activated",
+            treatment_col="treatment",
+            feature_cols=feature_cols,
+            method=req.method,  # type: ignore[arg-type]
+            n_folds=req.n_folds,
+        )
+        result = qini_curve(
+            df_enc["activated"].to_numpy(dtype=float),
+            df_enc["treatment"].to_numpy(dtype=float),
+            scores,
+            n_points=req.n_points,
+        )
+    except CausalEstimationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": "Qini evaluation failed", "detail": str(exc)},
+        )
+    except Exception as exc:
+        logger.error("segment/qini error: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Qini evaluation failed", "detail": str(exc)},
+        )
+
+    logger.info(
+        "segment/qini | method=%s | folds=%d | n=%d | coefficient=%.2f",
+        req.method, req.n_folds, result["n_users"], result["qini_coefficient"],
+    )
+    return {**result, "method": req.method, "n_folds": req.n_folds, "cross_fitted": True}
+
+
+def _load_features(
+    tenant_id: str,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """
+    Load signed-up users and build the CATE feature matrix.
+
+    Shared by /segment/cate and /segment/qini so both evaluate the same
+    encoding: one-hot categoricals (drop_first) + log pre_activation_rate.
+
+    Returns:
+        (raw df, encoded df, feature column names)
+    """
     clauses, params = [], []
-    if req.date_from:
+    if date_from:
         clauses.append("impression_date >= ?")
-        params.append(req.date_from)
-    if req.date_to:
+        params.append(date_from)
+    if date_to:
         clauses.append("impression_date <= ?")
-        params.append(req.date_to)
+        params.append(date_to)
 
     with get_tenant_conn(tenant_id) as conn:
         df = conn.execute(
@@ -164,7 +262,6 @@ def _run_cate(req: CateRequest, tenant_id: str = "demo") -> dict:
             "Run demo reset to regenerate the dataset."
         )
 
-    # 2. Feature engineering
     # One-hot encode categoricals; drop_first avoids perfect multicollinearity
     df_enc = pd.get_dummies(df, columns=["company_size", "channel", "industry"], drop_first=True)
 
@@ -176,6 +273,11 @@ def _run_cate(req: CateRequest, tenant_id: str = "demo") -> dict:
         if c.startswith(("company_size_", "channel_", "industry_"))
         or c == "pre_activation_rate_log"
     ]
+    return df, df_enc, feature_cols
+
+
+def _run_cate(req: CateRequest, tenant_id: str = "demo") -> dict:
+    df, df_enc, feature_cols = _load_features(tenant_id, req.date_from, req.date_to)
 
     # 3. Fit T-Learner and get per-user CATE estimates
     df_with_cate = estimate_cate(

@@ -328,6 +328,37 @@ def _t_learner(Y: np.ndarray, T: np.ndarray, X: np.ndarray) -> np.ndarray:
     return model_t.predict(X) - model_c.predict(X)
 
 
+def fit_s_learner_model(Y: np.ndarray, T: np.ndarray, X: np.ndarray) -> object:
+    """
+    Fit the S-Learner's single response surface and return the fitted model.
+
+    Exposed separately (like fit_t_learner_models) so cross-fitting can
+    predict on held-out folds.
+
+    Args:
+        Y: Outcome array.
+        T: Binary treatment array.
+        X: Feature matrix.
+
+    Returns:
+        Fitted regressor over [X, T] where
+        CATE(x) = model.predict([x, 1]) - model.predict([x, 0]).
+    """
+    from sklearn.ensemble import GradientBoostingRegressor
+
+    XT = np.column_stack([X, T])
+    model = GradientBoostingRegressor(n_estimators=100, max_depth=3, random_state=42)
+    model.fit(XT, Y)
+    return model
+
+
+def _s_learner_predict(model: object, X: np.ndarray) -> np.ndarray:
+    """Predict CATE(x) = mu(x, 1) - mu(x, 0) from a fitted S-Learner model."""
+    X1 = np.column_stack([X, np.ones(len(X))])
+    X0 = np.column_stack([X, np.zeros(len(X))])
+    return model.predict(X1) - model.predict(X0)
+
+
 def _s_learner(Y: np.ndarray, T: np.ndarray, X: np.ndarray) -> np.ndarray:
     """
     S-Learner: single model with treatment as a feature.
@@ -335,15 +366,8 @@ def _s_learner(Y: np.ndarray, T: np.ndarray, X: np.ndarray) -> np.ndarray:
     mu(x, t) = E[Y | X=x, T=t]
     CATE(x)  = mu(x, 1) - mu(x, 0)
     """
-    from sklearn.ensemble import GradientBoostingRegressor
-
-    XT = np.column_stack([X, T])
-    model = GradientBoostingRegressor(n_estimators=100, max_depth=3, random_state=42)
-    model.fit(XT, Y)
-
-    X1 = np.column_stack([X, np.ones(len(X))])
-    X0 = np.column_stack([X, np.zeros(len(X))])
-    return model.predict(X1) - model.predict(X0)
+    model = fit_s_learner_model(Y, T, X)
+    return _s_learner_predict(model, X)
 
 
 def _causal_forest(
@@ -486,6 +510,186 @@ def bootstrap_segment_cate_cis(
         method, n_boot, len(results), alpha,
     )
     return results
+
+
+# ---------------------------------------------------------------------------
+# Qini curve — validates the CATE *ranking* against realized outcomes
+# ---------------------------------------------------------------------------
+
+
+def cross_fitted_cate(
+    df: pd.DataFrame,
+    outcome_col: str,
+    treatment_col: str,
+    feature_cols: list[str],
+    method: Literal["s_learner", "t_learner"] = "t_learner",
+    n_folds: int = 5,
+    random_state: int = 42,
+) -> np.ndarray:
+    """
+    Out-of-fold CATE predictions via K-fold cross-fitting.
+
+    Each user's score comes from a model that never saw that user during
+    fitting. Required for honest Qini evaluation: scoring the training data
+    with the training-data model inflates the apparent ranking quality.
+
+    Folds are stratified by treatment so every training split contains both
+    arms.
+
+    Args:
+        df:            One row per user.
+        outcome_col:   Outcome column.
+        treatment_col: Binary treatment indicator (0/1).
+        feature_cols:  Pre-treatment covariates (encoded).
+        method:        't_learner' (default) or 's_learner'.
+        n_folds:       Number of folds (>= 2).
+        random_state:  Seed for fold shuffling.
+
+    Returns:
+        Array of out-of-fold CATE predictions aligned to df's row order
+        (NaN for rows dropped by the required-column dropna).
+
+    Raises:
+        CausalEstimationError: If columns are missing, method is unsupported,
+                               or an arm is too small to stratify.
+    """
+    from sklearn.model_selection import StratifiedKFold
+
+    if method not in ("t_learner", "s_learner"):
+        raise CausalEstimationError(
+            f"Cross-fitting supports t_learner and s_learner, got '{method}'."
+        )
+    for col in [outcome_col, treatment_col] + feature_cols:
+        if col not in df.columns:
+            raise CausalEstimationError(f"Column '{col}' not found in DataFrame.")
+    if n_folds < 2:
+        raise CausalEstimationError(f"n_folds must be >= 2, got {n_folds}.")
+
+    sub = df[[outcome_col, treatment_col] + feature_cols].dropna()
+    Y = sub[outcome_col].to_numpy(dtype=float)
+    T = sub[treatment_col].to_numpy(dtype=float)
+    X = sub[feature_cols].to_numpy(dtype=float)
+
+    if min(int(T.sum()), int((1 - T).sum())) < n_folds:
+        raise CausalEstimationError(
+            f"Each arm needs at least n_folds={n_folds} users to stratify folds."
+        )
+
+    scores = np.full(len(sub), np.nan)
+    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+    for train_idx, test_idx in skf.split(X, T):
+        if method == "t_learner":
+            model_t, model_c = fit_t_learner_models(Y[train_idx], T[train_idx], X[train_idx])
+            scores[test_idx] = model_t.predict(X[test_idx]) - model_c.predict(X[test_idx])
+        else:
+            model = fit_s_learner_model(Y[train_idx], T[train_idx], X[train_idx])
+            scores[test_idx] = _s_learner_predict(model, X[test_idx])
+
+    aligned = pd.Series(np.nan, index=df.index)
+    aligned.loc[sub.index] = scores
+    logger.info(
+        "cross_fitted_cate | method=%s | n=%d | folds=%d", method, len(sub), n_folds,
+    )
+    return aligned.to_numpy()
+
+
+def qini_curve(
+    y: np.ndarray,
+    t: np.ndarray,
+    scores: np.ndarray,
+    n_points: int = 101,
+) -> dict:
+    """
+    Compute the Qini curve for an uplift score against realized outcomes.
+
+    Users are ranked by predicted CATE descending. At each targeted fraction
+    φ, the curve reports cumulative incremental conversions among the top-φ:
+
+        Qini(k) = Y_t(k) − Y_c(k) · N_t(k) / N_c(k)
+
+    where Y_t/Y_c are cumulative outcomes and N_t/N_c cumulative counts in
+    the treatment/control arms of the top-k users. The random-targeting
+    baseline is the straight line to the overall incremental total; the Qini
+    coefficient is the area between curve and baseline (trapezoidal, on the
+    fraction scale) — positive means the ranking concentrates real uplift.
+
+    Args:
+        y:        Realized binary/continuous outcomes.
+        t:        Binary treatment indicators (0/1).
+        scores:   Predicted CATE per user (use cross-fitted scores — in-sample
+                  scores overstate ranking quality). NaN scores are dropped.
+        n_points: Number of curve points returned (downsampled for payloads).
+
+    Returns:
+        Dict with keys:
+            fractions        — targeted fraction grid (ends at 1.0)
+            incremental      — Qini value at each fraction (conversions)
+            random_baseline  — straight-line values at each fraction
+            qini_coefficient — area between curve and baseline
+            total_incremental — Qini value at φ=1 (overall lift, conversions)
+            capture_shares   — {fraction: share of total incremental captured}
+                               for 10/20/30/50% targeting (empty if total <= 0)
+            n_users          — users evaluated after NaN filtering
+
+    Raises:
+        CausalEstimationError: If arrays are mismatched, empty after NaN
+                               filtering, or an arm is absent.
+    """
+    y = np.asarray(y, dtype=float)
+    t = np.asarray(t, dtype=float)
+    scores = np.asarray(scores, dtype=float)
+    if not (len(y) == len(t) == len(scores)):
+        raise CausalEstimationError(
+            f"y, t, scores must be the same length — got {len(y)}, {len(t)}, {len(scores)}."
+        )
+
+    keep = ~np.isnan(scores)
+    y, t, scores = y[keep], t[keep], scores[keep]
+    n = len(y)
+    if n == 0:
+        raise CausalEstimationError("No rows with non-NaN scores to evaluate.")
+    if t.sum() == 0 or (1 - t).sum() == 0:
+        raise CausalEstimationError("Qini needs both treatment and control users.")
+
+    order = np.argsort(-scores, kind="stable")
+    y_s, t_s = y[order], t[order]
+
+    cum_yt = np.cumsum(y_s * t_s)
+    cum_yc = np.cumsum(y_s * (1 - t_s))
+    cum_nt = np.cumsum(t_s)
+    cum_nc = np.cumsum(1 - t_s)
+
+    # Where no control users have been reached yet, incremental = treated outcomes
+    ratio = np.divide(cum_nt, cum_nc, out=np.zeros(n), where=cum_nc > 0)
+    qini_full = np.where(cum_nc > 0, cum_yt - cum_yc * ratio, cum_yt)
+
+    ks = np.unique(np.linspace(0, n - 1, num=min(n_points, n)).astype(int))
+    fractions = (ks + 1) / n
+    incremental = qini_full[ks]
+    total_incremental = float(qini_full[-1])
+    random_baseline = fractions * total_incremental
+
+    qini_coefficient = float(np.trapezoid(incremental - random_baseline, fractions))
+
+    capture_shares: dict[str, float] = {}
+    if total_incremental > 0:
+        for frac in (0.10, 0.20, 0.30, 0.50):
+            k = max(int(frac * n) - 1, 0)
+            capture_shares[f"{frac:.2f}"] = round(float(qini_full[k]) / total_incremental, 4)
+
+    logger.info(
+        "qini_curve | n=%d | total_incremental=%.1f | qini_coefficient=%.2f",
+        n, total_incremental, qini_coefficient,
+    )
+    return {
+        "fractions":         [round(float(f), 4) for f in fractions],
+        "incremental":       [round(float(v), 2) for v in incremental],
+        "random_baseline":   [round(float(v), 2) for v in random_baseline],
+        "qini_coefficient":  round(qini_coefficient, 2),
+        "total_incremental": round(total_incremental, 2),
+        "capture_shares":    capture_shares,
+        "n_users":           n,
+    }
 
 
 # ---------------------------------------------------------------------------
