@@ -292,6 +292,11 @@ def activate_contacts(body: ActivateRequest, user: CurrentUser) -> dict:
     the outreach campaign. The Results tab uses this data to compute
     real campaign lift instead of the historical segment baseline.
 
+    Holdout contacts are updated too — the holdout activation rate is the
+    control side of the lift measurement, so their outcomes MUST be
+    recorded (a holdout whose activations are never logged makes measured
+    lift equal the raw treated rate).
+
     activated_at: ISO datetime string. Defaults to now if omitted.
     """
     from datetime import datetime, timezone
@@ -309,7 +314,7 @@ def activate_contacts(body: ActivateRequest, user: CurrentUser) -> dict:
                 """
                 UPDATE contact_sends
                 SET activated_at = ?, status = 'activated'
-                WHERE email = ? AND tenant_id = ? AND is_holdout = 0
+                WHERE email = ? AND tenant_id = ?
                 """,
                 (activated_at, email, tenant_id),
             )

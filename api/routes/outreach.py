@@ -309,8 +309,15 @@ def outreach_lift(user: dict | None = Depends(get_optional_user)) -> dict:
                     AVG(cate_estimate) AS predicted_cate,
                     SUM(CASE WHEN is_holdout = 0 THEN 1 ELSE 0 END)                         AS n_sent,
                     SUM(CASE WHEN is_holdout = 1 THEN 1 ELSE 0 END)                         AS n_holdout,
-                    AVG(CASE WHEN is_holdout = 0 AND activated_at IS NOT NULL THEN 1.0 ELSE 0.0 END) AS sent_activation_rate,
-                    AVG(CASE WHEN is_holdout = 1 AND activated_at IS NOT NULL THEN 1.0 ELSE 0.0 END) AS holdout_activation_rate,
+                    -- Inner CASE has no ELSE for the other arm's rows → NULL,
+                    -- which AVG skips: each rate is divided by its OWN arm's
+                    -- count, not the whole segment.
+                    AVG(CASE WHEN is_holdout = 0 THEN
+                            CASE WHEN activated_at IS NOT NULL THEN 1.0 ELSE 0.0 END
+                        END) AS sent_activation_rate,
+                    AVG(CASE WHEN is_holdout = 1 THEN
+                            CASE WHEN activated_at IS NOT NULL THEN 1.0 ELSE 0.0 END
+                        END) AS holdout_activation_rate,
                     MAX(sent_at) AS last_sent_at
                 FROM contact_sends
                 WHERE tenant_id = ?
@@ -353,8 +360,9 @@ def outreach_lift(user: dict | None = Depends(get_optional_user)) -> dict:
             n_holdout = int(row["n_holdout"])
             total_sent    += n_sent
             total_holdout += n_holdout
-            t_rate  = round(float(row["sent_activation_rate"]),    4)
-            c_rate  = round(float(row["holdout_activation_rate"]), 4)
+            # NULL when the segment has no rows in that arm (AVG over zero rows)
+            t_rate  = round(float(row["sent_activation_rate"] or 0.0),    4)
+            c_rate  = round(float(row["holdout_activation_rate"] or 0.0), 4)
             predicted = round(float(row["predicted_cate"]), 4)
             segments_out.append({
                 "segment_id":     row["segment_id"],
