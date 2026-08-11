@@ -4,6 +4,8 @@ Causal targeting engine for GTM funnels. Identifies which customer segments resp
 
 **Stack:** Python 3.12 · FastAPI · React · EconML · Claude API · DuckDB · Resend
 
+![GTMLens Segments tab — activation lift with 95% CI, balanced-groups check, and funnel breakdown on the demo dataset](docs/screenshot-segments.png)
+
 ---
 
 ## What it does
