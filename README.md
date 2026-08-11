@@ -15,6 +15,22 @@ Most GTM tools tell you what happened. GTMLens tells you *why* — and who to ta
 3. **Claude-generated outreach** — segment-conditional emails, only for segments above the uplift threshold
 4. **Causal lift measurement** — 20% holdout auto-assigned per segment; Results tab shows treatment rate minus holdout rate once activations are imported
 
+See [USER_MANUAL.md](USER_MANUAL.md) for the full walkthrough — or click **Try demo** on the login screen (no account needed; runs on the synthetic dataset below).
+
+---
+
+## Quickstart
+
+```bash
+cp .env.example .env              # fill in ANTHROPIC_API_KEY + JWT_SECRET_KEY (min 32 chars)
+uv sync                           # install Python deps from uv.lock
+uv run python data/seed_db.py     # generate synthetic demo data (known ground truth)
+uv run pytest tests/ -q           # 268 tests
+uv run uvicorn api.main:app --reload
+```
+
+In a second terminal: `cd ui && npm install && npm run dev` — the Vite dev server on `http://localhost:5173` proxies `/api` to the backend.
+
 ---
 
 ## CATE accuracy on demo scenario
