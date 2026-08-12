@@ -130,6 +130,19 @@ Chi-square test at α = 0.01. Run before reporting any ATE. Surfaced as a warnin
 ### Holdout assignment
 `hash(segment_id + email) % 100 < holdout_pct * 100` — deterministic, no state required, same contact always lands in the same bucket for a given segment.
 
+### Estimand assumptions
+Treatment-minus-holdout is a **persuasion** estimate only when the outcome is reachable
+without treatment — organic product usage, inbound, referrals, i.e. a nonzero control
+baseline. If the outcome only exists downstream of the email (pure cold outbound where a
+reply or booking is the outcome), the control arm has no path to convert: "lift" collapses
+to access, and uplift ranking degenerates into a response-propensity model. In that setup,
+change what `treatment` encodes — compare two credible strategies (personalised vs.
+template, 1-touch vs. 3-touch, send-now vs. send-later) so the counterfactual is the same
+prospect under the alternative. `core/causal.check_control_baseline` guards this: it flags
+a near-zero control baseline (with a Clopper-Pearson upper bound to separate a structurally
+zero baseline from a small control arm), runs alongside SRM on `/api/analyze`, and surfaces
+as a warning banner on the Funnel tab.
+
 ---
 
 ## Tests
@@ -141,7 +154,7 @@ pytest tests/ -v --tb=short
 | Module | Tests |
 |---|---|
 | `test_preprocess.py` | Winsorize clips correctly; log handles zeros; no input mutation |
-| `test_causal.py` | CUPED recovers known ATE; SRM detects 60/40 split at p<0.01; BH rejects fewer than Bonferroni |
+| `test_causal.py` | CUPED recovers known ATE; SRM detects 60/40 split at p<0.01; BH rejects fewer than Bonferroni; degenerate control baseline flagged |
 | `test_experiment.py` | Power calc matches scipy reference; CUPED adjustment reduces N |
 | `test_outreach.py` | Only high-uplift segments get messages; holdout fraction correct; JSON parse succeeds |
 | `test_auth.py` | Register · login · JWT validation · 401 on tampered token |
@@ -153,6 +166,12 @@ pytest tests/ -v --tb=short
 GTMLens plugs into a [Clay](https://clay.com) table as the **causal scoring brain**: Clay
 sources and enriches prospects and pushes to your sequencer; GTMLens decides who is worth
 contacting (uplift, not fit score), keeps the holdout honest, and measures real lift.
+
+> **Note on cold outbound:** if prospects can *only* convert by receiving the sequence,
+> the holdout measures access rather than persuasion — see
+> [Estimand assumptions](#estimand-assumptions). The loop below stays valid as long as the
+> outcome you import (activation, signup) has a non-outreach path; for pure-outbound
+> outcomes, encode two strategies as the arms instead of send vs. don't-send.
 
 ### 1. Mint an API key
 

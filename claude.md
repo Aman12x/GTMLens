@@ -152,7 +152,7 @@ Every module in `core/` needs tests before moving on. Minimum coverage:
 | Module | Required tests |
 |---|---|
 | `preprocess.py` | Winsorize clips correctly; log handles zeros; no mutation of input series |
-| `causal.py` | CUPED recovers known ATE on synthetic data; SRM detects 60/40 split at p<0.01; BH rejects fewer than Bonferroni |
+| `causal.py` | CUPED recovers known ATE on synthetic data; SRM detects 60/40 split at p<0.01; BH rejects fewer than Bonferroni; degenerate control baseline flagged (access vs. persuasion) |
 | `experiment.py` | Power calc matches scipy reference; CUPED adjustment reduces N by expected amount |
 | `outreach.py` | Only high-uplift segments get messages; holdout fraction is correct; JSON parse succeeds |
 | `narrative.py` | Output contains SHIP/ITERATE/ABORT; guardrail section present; falls back gracefully on API error |

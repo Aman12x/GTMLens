@@ -1,6 +1,6 @@
 # GTMLens — User Manual
 
-GTMLens finds which customer segments actually respond to outreach (not just who opened an email), generates targeted messages for those segments, and measures whether the outreach *caused* the activation.
+GTMLens finds which customer segments actually respond to outreach (not just who opened an email), generates targeted messages for those segments, and measures the *incremental* activation lift of outreach against a holdout — how many activations the campaign added beyond what would have happened anyway.
 
 **Just want to explore?** Click **Try demo** on the login screen — no account needed. The demo runs on a synthetic dataset with known ground truth so you can see every tab without uploading anything.
 
@@ -36,6 +36,8 @@ One row per user. Three columns are required; everything else is optional.
 
 **You need both treated and control rows.** GTMLens measures the *difference* in activation between people who got outreach and people who didn't. If everyone in your dataset received outreach, upload it anyway — but note the causal estimate will be weaker without a clean holdout.
 
+**The holdout comparison assumes people can activate without outreach** — through the product itself, organic search, referrals, inbound, and so on. That's what makes the lift number a *persuasion* estimate: it tells you how many would have activated anyway. If activation is only possible through outreach (a pure cold-outbound funnel where nobody converts without being contacted), the control group has no path to convert, and "lift" just measures access. In that case, change what `treatment` encodes: compare two credible strategies instead — personalised vs. template message, 1-touch vs. 3-touch sequence, send-now vs. send-later — so `1` and `0` answer "what would this same prospect have done under the alternative?" GTMLens shows a warning banner on the Funnel tab when it detects a near-zero control baseline.
+
 **Which activation event to use:** pick the one closest to revenue with enough volume. If you have 500 users, a 30% activation rate (150 activations) is workable; a 2% rate (10 activations) isn't. If you have multiple events (trial → paid → expansion), use the one you most want to move.
 
 Download the **Sample CSV** button on the Data tab to see the exact format.
@@ -66,7 +68,7 @@ One row per person you want to email.
 4. Click **Generate outreach** — Claude writes a subject, body, and CTA for that segment
 5. Review the message, then click **Send to N contacts**
 
-**Holdout badge:** if the generated message shows a "Holdout" badge, it was generated for a preview-only user in the 20% control group — don't send it. GTMLens reserves 20% of each segment as a control group so it can measure whether the email *caused* the activation, rather than just correlating with it.
+**Holdout badge:** if the generated message shows a "Holdout" badge, it was generated for a preview-only user in the 20% control group — don't send it. GTMLens reserves 20% of each segment as a control group so it can measure the email's *incremental* lift — activations beyond what the untouched group produced — rather than just a correlation.
 
 ---
 
