@@ -19,6 +19,7 @@ from core.causal import (
     CausalEstimationError,
     bh_correction,
     bootstrap_segment_cate_cis,
+    check_control_baseline,
     cuped_adjustment,
     detect_srm,
     diff_in_diff,
@@ -196,6 +197,87 @@ def test_srm_invalid_split_raises() -> None:
 def test_srm_zero_total_raises() -> None:
     with pytest.raises(ValueError, match="0"):
         detect_srm(0, 0)
+
+
+# ---------------------------------------------------------------------------
+# Control Baseline Check
+# ---------------------------------------------------------------------------
+
+
+def test_control_baseline_structurally_zero_flagged() -> None:
+    """0 conversions in a large control arm → degenerate AND structurally zero."""
+    result = check_control_baseline(n_control_converted=0, n_control=5000)
+    assert result["degenerate_baseline"] is True
+    assert result["structurally_zero"] is True
+    assert "access" in result["recommendation"]
+
+
+def test_control_baseline_healthy_rate_passes() -> None:
+    """A 10% control conversion rate is a valid persuasion baseline."""
+    result = check_control_baseline(n_control_converted=100, n_control=1000)
+    assert result["degenerate_baseline"] is False
+    assert result["structurally_zero"] is False
+    assert result["control_rate"] == pytest.approx(0.10)
+
+
+def test_control_baseline_small_n_zero_is_not_structural() -> None:
+    """0/50 is below threshold but too small to call structurally zero."""
+    result = check_control_baseline(n_control_converted=0, n_control=50)
+    assert result["degenerate_baseline"] is True
+    assert result["structurally_zero"] is False
+
+
+def test_control_baseline_ci_upper_bounds_rate() -> None:
+    """The one-sided upper bound must sit at or above the observed rate."""
+    result = check_control_baseline(n_control_converted=3, n_control=1000)
+    assert result["control_rate_ci_upper"] >= result["control_rate"]
+    assert result["control_rate_ci_upper"] <= 1.0
+
+
+def test_control_baseline_returns_all_expected_keys() -> None:
+    result = check_control_baseline(50, 1000)
+    expected = {
+        "degenerate_baseline", "structurally_zero", "control_rate",
+        "control_rate_ci_upper", "min_rate", "recommendation",
+    }
+    assert expected.issubset(result.keys())
+
+
+def test_control_baseline_negative_counts_raise() -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        check_control_baseline(-1, 1000)
+
+
+def test_control_baseline_empty_control_raises() -> None:
+    with pytest.raises(ValueError, match="empty"):
+        check_control_baseline(0, 0)
+
+
+def test_control_baseline_converted_exceeds_n_raises() -> None:
+    with pytest.raises(ValueError, match="exceed"):
+        check_control_baseline(11, 10)
+
+
+def test_control_baseline_invalid_min_rate_raises() -> None:
+    with pytest.raises(ValueError, match="min_rate"):
+        check_control_baseline(0, 100, min_rate=1.5)
+
+
+def test_analyze_endpoint_reports_baseline() -> None:
+    """/api/analyze surfaces the control-baseline check alongside SRM."""
+    from fastapi.testclient import TestClient
+
+    from api.main import app
+
+    with TestClient(app) as client:
+        resp = client.post("/api/analyze", json={})
+        assert resp.status_code == 200
+        baseline = resp.json()["baseline"]
+        assert baseline is not None
+        # Demo data has organic activation, so the baseline must be healthy
+        assert baseline["degenerate_baseline"] is False
+        assert baseline["control_rate"] > 0
+        assert "recommendation" in baseline
 
 
 # ---------------------------------------------------------------------------

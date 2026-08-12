@@ -27,6 +27,7 @@ export function FunnelPage() {
 
   const cuped = data?.cuped;
   const srm = data?.srm;
+  const baseline = data?.baseline;
 
   return (
     <div className="space-y-6">
@@ -113,6 +114,16 @@ export function FunnelPage() {
             <Alert variant="warning" title="Uneven treatment split detected">
               {pct(srm.observed_split)} of users received outreach — expected 50%.{" "}
               Activation estimates may be unreliable. Check that your data was split randomly.
+            </Alert>
+          )}
+
+          {/* ── Control baseline warning ────────────────────── */}
+          {baseline?.degenerate_baseline && (
+            <Alert variant="warning" title="Control group barely converts on its own">
+              Only {pct(baseline.control_rate)} of the control group activated.{" "}
+              {baseline.structurally_zero
+                ? "That suggests activation isn't reachable without outreach — the lift shown below measures access, not persuasion. Consider comparing two outreach strategies (e.g. personalised vs. template) instead of outreach vs. nothing."
+                : "The control group may be too small to tell whether activation is possible without outreach. Collect more control outcomes before reading the lift as persuasion."}
             </Alert>
           )}
 

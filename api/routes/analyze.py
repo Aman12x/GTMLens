@@ -26,7 +26,12 @@ from pydantic import BaseModel, Field
 
 from api.db import get_tenant_conn, tenant_has_data
 from api.deps import OptionalUser, tenant_id_from
-from core.causal import CausalEstimationError, cuped_adjustment, detect_srm
+from core.causal import (
+    CausalEstimationError,
+    check_control_baseline,
+    cuped_adjustment,
+    detect_srm,
+)
 from core.preprocess import winsorize
 
 logger = logging.getLogger(__name__)
@@ -70,6 +75,14 @@ class SrmResult(BaseModel):
     recommendation: str
 
 
+class BaselineResult(BaseModel):
+    degenerate_baseline: bool
+    structurally_zero: bool
+    control_rate: float
+    control_rate_ci_upper: float
+    recommendation: str
+
+
 class CupedResult(BaseModel):
     ate: float
     ate_se: float
@@ -85,6 +98,7 @@ class AnalyzeResponse(BaseModel):
     total_users: int
     funnel: list[FunnelStage]
     srm: SrmResult
+    baseline: BaselineResult | None
     cuped: CupedResult | None
     daily_trend: list[dict]
     filters_applied: dict
@@ -218,6 +232,19 @@ def _run_analysis(req: AnalyzeRequest, tenant_id: str = "demo") -> dict:
         recommendation=srm_result["recommendation"],
     )
 
+    # Estimand guard — a ~0 control baseline means lift measures access, not persuasion
+    baseline: BaselineResult | None = None
+    if n_c > 0:
+        n_c_activated = int(users_df.loc[users_df["treatment"] == 0, "activated"].sum())
+        base_result = check_control_baseline(n_c_activated, n_c)
+        baseline = BaselineResult(
+            degenerate_baseline=base_result["degenerate_baseline"],
+            structurally_zero=base_result["structurally_zero"],
+            control_rate=round(base_result["control_rate"], 6),
+            control_rate_ci_upper=round(base_result["control_rate_ci_upper"], 6),
+            recommendation=base_result["recommendation"],
+        )
+
     # CUPED — only on signed-up users (activation is the outcome)
     # Outcome: binary activated flag (0/1) — do NOT winsorize binary outcomes.
     # Covariate: pre_activation_rate (continuous) — winsorize to reduce outlier influence.
@@ -247,6 +274,7 @@ def _run_analysis(req: AnalyzeRequest, tenant_id: str = "demo") -> dict:
         "total_users":     n_total,
         "funnel":          funnel,
         "srm":             srm,
+        "baseline":        baseline,
         "cuped":           cuped,
         "daily_trend":     daily_trend,
         "filters_applied": {k: v for k, v in req.model_dump().items() if v is not None and k != "expected_split"},

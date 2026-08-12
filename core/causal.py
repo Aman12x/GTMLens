@@ -1,5 +1,6 @@
 """
-Causal inference core: CUPED, CATE/HTE, DiD, SRM detection, BH correction.
+Causal inference core: CUPED, CATE/HTE, DiD, SRM detection, control-baseline
+check, BH correction.
 
 All functions follow the statistical correctness rules in CLAUDE.md:
     - Winsorize BEFORE calling cuped_adjustment (caller's responsibility)
@@ -871,6 +872,104 @@ def detect_srm(
         "expected_split":  expected_split,
         "chi2_stat":       float(chi2),
         "recommendation":  recommendation,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Control Baseline Check
+# ---------------------------------------------------------------------------
+
+
+def check_control_baseline(
+    n_control_converted: int,
+    n_control: int,
+    min_rate: float = 0.005,
+    confidence: float = 0.95,
+) -> dict:
+    """
+    Flag a degenerate (near-zero) control-arm conversion baseline.
+
+    Treatment-minus-holdout is a persuasion estimate only when the outcome is
+    reachable without treatment. If the control arm converts at ~0 (e.g. pure
+    cold outbound where a reply can only come from the email), lift measures
+    access rather than persuasion, and uplift ranking degenerates into a
+    response-propensity model. Run alongside detect_srm before reporting lift.
+
+    A Clopper-Pearson one-sided upper bound distinguishes a structurally zero
+    baseline from a small control arm that simply hasn't observed a
+    conversion yet.
+
+    Args:
+        n_control_converted: Conversions observed in the control arm.
+        n_control:           Total control-arm size.
+        min_rate:            Baseline below this rate is flagged (default 0.005).
+        confidence:          Level for the one-sided upper bound (default 0.95).
+
+    Returns:
+        Dict with keys:
+            degenerate_baseline   — True if observed control rate < min_rate
+            structurally_zero     — True if even the upper bound is < min_rate
+            control_rate          — observed control conversion rate
+            control_rate_ci_upper — one-sided Clopper-Pearson upper bound
+            min_rate              — threshold used
+            recommendation        — human-readable action string
+
+    Raises:
+        ValueError: If counts are negative, n_control_converted > n_control,
+                    n_control is 0, or min_rate/confidence is outside (0, 1).
+    """
+    if n_control < 0 or n_control_converted < 0:
+        raise ValueError("Counts must be non-negative.")
+    if n_control == 0:
+        raise ValueError("Control arm is empty — no baseline to check.")
+    if n_control_converted > n_control:
+        raise ValueError("n_control_converted cannot exceed n_control.")
+    if not (0.0 < min_rate < 1.0):
+        raise ValueError(f"min_rate must be in (0, 1), got {min_rate}.")
+    if not (0.0 < confidence < 1.0):
+        raise ValueError(f"confidence must be in (0, 1), got {confidence}.")
+
+    control_rate = n_control_converted / n_control
+    if n_control_converted == n_control:
+        ci_upper = 1.0
+    else:
+        ci_upper = float(
+            stats.beta.ppf(confidence, n_control_converted + 1, n_control - n_control_converted)
+        )
+
+    degenerate = control_rate < min_rate
+    structurally_zero = ci_upper < min_rate
+
+    if structurally_zero:
+        recommendation = (
+            f"CONTROL BASELINE ~ 0 (rate={control_rate:.4f}, upper bound {ci_upper:.4f} < {min_rate}). "
+            f"The outcome appears unreachable without treatment: lift measures access, not persuasion, "
+            f"and uplift ranking degenerates to response propensity. Change the estimand — encode two "
+            f"credible strategies as the treatment arms (e.g. personalised vs. template) so the "
+            f"counterfactual is the same prospect under the alternative."
+        )
+        logger.warning(recommendation)
+    elif degenerate:
+        recommendation = (
+            f"Control baseline below threshold (rate={control_rate:.4f} < {min_rate}), but the control "
+            f"arm is too small to distinguish a structurally zero baseline from sampling noise "
+            f"(upper bound {ci_upper:.4f}). Collect more control outcomes before interpreting lift "
+            f"as persuasion."
+        )
+        logger.warning(recommendation)
+    else:
+        recommendation = (
+            f"Control baseline {control_rate:.4f} >= {min_rate} — the outcome is reachable without "
+            f"treatment; treatment-minus-holdout is a valid persuasion estimate."
+        )
+
+    return {
+        "degenerate_baseline":   degenerate,
+        "structurally_zero":     structurally_zero,
+        "control_rate":          control_rate,
+        "control_rate_ci_upper": ci_upper,
+        "min_rate":              min_rate,
+        "recommendation":        recommendation,
     }
 
 

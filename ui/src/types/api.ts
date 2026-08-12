@@ -21,6 +21,14 @@ export interface SrmResult {
   recommendation: string;
 }
 
+export interface BaselineResult {
+  degenerate_baseline: boolean;
+  structurally_zero: boolean;
+  control_rate: number;
+  control_rate_ci_upper: number;
+  recommendation: string;
+}
+
 export interface CupedResult {
   ate: number;
   ate_se: number;
@@ -47,6 +55,7 @@ export interface AnalyzeResponse {
   total_users: number;
   funnel: FunnelStage[];
   srm: SrmResult;
+  baseline: BaselineResult | null;
   cuped: CupedResult | null;
   daily_trend: DailyTrendPoint[];
   filters_applied: Record<string, string>;
